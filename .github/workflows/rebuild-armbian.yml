@@ -93,7 +93,113 @@ jobs:
           armbian_fstype: ext4
           builder_name: yf023d
 
-      - name: Upload Rock-3B based Armbian
+      - name: Replace DTB in rebuilt image
+        if: ${{ env.PACKAGED_STATUS == 'success' && !cancelled() }}
+        run: |
+          # Find the rebuilt image
+          IMG_GZ=$(find ${{ env.PACKAGED_OUTPUTPATH }} -name "*.img.gz" | head -1)
+          if [ -z "$IMG_GZ" ]; then
+            echo "ERROR: No rebuilt image found"
+            exit 1
+          fi
+          echo "Rebuilt image: ${IMG_GZ}"
+
+          # Decompress
+          cp "${IMG_GZ}" /tmp/rebuilt.img.gz
+          gzip -d /tmp/rebuilt.img.gz
+
+          # Check partition layout
+          echo "=== Partition layout ==="
+          fdisk -l /tmp/rebuilt.img
+
+          # Set up loop device with partition scanning
+          LOOP=$(sudo losetup -fP --show /tmp/rebuilt.img)
+          echo "Loop: ${LOOP}"
+
+          # Wait for partition devices to appear
+          sudo partprobe "${LOOP}"
+          sleep 2
+
+          # List partition devices
+          ls -la ${LOOP}* 2>/dev/null || echo "No partition devices found"
+          ls -la /dev/mapper/ 2>/dev/null | grep loop || echo "No mapper devices"
+
+          # Try to find the rootfs partition
+          # Check for partition 1 or partition 2
+          ROOT_PART=""
+          BOOT_PART=""
+          for p in ${LOOP}p1 ${LOOP}p2 ${LOOP}1 ${LOOP}2; do
+            if [ -b "$p" ]; then
+              FSTYPE=$(sudo blkid -s TYPE -o value "$p" 2>/dev/null)
+              echo "Partition $p: ${FSTYPE}"
+              if [ "$FSTYPE" = "ext4" ]; then
+                ROOT_PART="$p"
+              fi
+            fi
+          done
+
+          if [ -z "$ROOT_PART" ]; then
+            echo "ERROR: Could not find ext4 rootfs partition"
+            # Try mounting all partitions
+            sudo mkdir -p /mnt/p1 /mnt/p2
+            sudo mount ${LOOP}p1 /mnt/p1 2>/dev/null || sudo mount ${LOOP}1 /mnt/p1 2>/dev/null || true
+            sudo mount ${LOOP}p2 /mnt/p2 2>/dev/null || sudo mount ${LOOP}2 /mnt/p2 2>/dev/null || true
+            echo "Mounted p1:"; ls /mnt/p1/ 2>/dev/null | head -5
+            echo "Mounted p2:"; ls /mnt/p2/ 2>/dev/null | head -5
+            sudo umount /mnt/p1 /mnt/p2 2>/dev/null
+            sudo losetup -d "${LOOP}" 2>/dev/null
+            exit 1
+          fi
+
+          # Mount rootfs
+          sudo mkdir -p /mnt/rootfs
+          sudo mount "${ROOT_PART}" /mnt/rootfs
+
+          # Find boot directory
+          BOOT_DIR="/mnt/rootfs/boot"
+          if [ ! -d "${BOOT_DIR}" ]; then
+            BOOT_DIR="/mnt/rootfs"
+          fi
+          echo "Boot dir: ${BOOT_DIR}"
+          sudo ls -la "${BOOT_DIR}/" | head -10
+
+          # Find and compile custom DTB
+          DTS_SRC=$(find ${{ github.workspace }} -name "rk3568-yf-023d-v6.dts" 2>/dev/null | head -1)
+          if [ -n "$DTS_SRC" ]; then
+            sudo apt-get install -y device-tree-compiler >/dev/null 2>&1
+            dtc -I dts -O dtb -o /tmp/rk3568-yf-023d-v6.dtb "${DTS_SRC}"
+            echo "Custom DTB compiled"
+          else
+            echo "ERROR: No DTS file found"
+            sudo umount /mnt/rootfs
+            sudo losetup -d "${LOOP}"
+            exit 1
+          fi
+
+          # Install DTB
+          sudo mkdir -p "${BOOT_DIR}/dtb/rockchip"
+          sudo cp /tmp/rk3568-yf-023d-v6.dtb "${BOOT_DIR}/dtb/rockchip/"
+          echo "DTB installed"
+
+          # Update boot config
+          for conf in "${BOOT_DIR}/armbianEnv.txt" "${BOOT_DIR}/extlinux/extlinux.conf"; do
+            if [ -f "$conf" ]; then
+              sudo sed -i 's/rk3568-rock-3b.dtb/rk3568-yf-023d-v6.dtb/g' "$conf"
+              echo "Updated: $conf"
+              cat "$conf"
+            fi
+          done
+
+          # Cleanup
+          sudo umount /mnt/rootfs
+          sudo losetup -d "${LOOP}"
+
+          # Recompress
+          gzip -9 /tmp/rebuilt.img
+          cp /tmp/rebuilt.img.gz "${IMG_GZ}"
+          echo "DTB replacement complete"
+
+      - name: Upload
         uses: softprops/action-gh-release@v1
         if: ${{ env.PACKAGED_STATUS == 'success' && !cancelled() }}
         with:
@@ -102,19 +208,12 @@ jobs:
           body: |
             Armbian for Young-Feel YF-023D v6 RK3568
             
-            Based on Rock-3B image (correct RK3568 u-boot)
+            Based on Rock-3B (correct RK3568 u-boot)
+            Custom DTB: rk3568-yf-023d-v6.dtb
             Kernel: 6.12.y stable
             
-            **After booting, replace DTB:**
-            ```bash
-            # Download and install custom DTB
-            wget https://github.com/gdd-xxx/amlogic-s9xxx-armbian/raw/main/dts/rk3568-yf-023d-v6.dtb
-            sudo cp rk3568-yf-023d-v6.dtb /boot/dtb/rockchip/
-            sudo sed -i 's/rk3568-rock-3b.dtb/rk3568-yf-023d-v6.dtb/g' /boot/armbianEnv.txt
-            sudo reboot
-            ```
-            
             Default: root / 1234
+            Install: armbian-install
           files: ${{ env.PACKAGED_OUTPUTPATH }}/*
           make_latest: true
         env:
