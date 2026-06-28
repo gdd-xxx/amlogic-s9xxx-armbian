@@ -93,95 +93,6 @@ jobs:
           armbian_fstype: ext4
           builder_name: yf023d
 
-      - name: Replace DTB in rebuilt image
-        if: ${{ env.PACKAGED_STATUS == 'success' && !cancelled() }}
-        run: |
-          IMG_GZ=$(find ${{ env.PACKAGED_OUTPUTPATH }} -name "*.img.gz" | head -1)
-          if [ -z "$IMG_GZ" ]; then
-            echo "ERROR: No rebuilt image found"
-            exit 1
-          fi
-
-          cp "${IMG_GZ}" /tmp/rebuilt.img.gz
-          gzip -d /tmp/rebuilt.img.gz
-
-          LOOP=$(sudo losetup -fP --show /tmp/rebuilt.img)
-          sudo partprobe "${LOOP}"
-          sleep 2
-
-          # Find ext4 partition
-          ROOT_PART=""
-          for p in ${LOOP}p1 ${LOOP}p2; do
-            if [ -b "$p" ]; then
-              FSTYPE=$(sudo blkid -s TYPE -o value "$p" 2>/dev/null)
-              if [ "$FSTYPE" = "ext4" ]; then
-                ROOT_PART="$p"
-              fi
-            fi
-          done
-
-          if [ -z "$ROOT_PART" ]; then
-            echo "ERROR: No ext4 partition"
-            sudo losetup -d "${LOOP}"
-            exit 1
-          fi
-
-          sudo mkdir -p /mnt/rootfs
-          sudo mount "${ROOT_PART}" /mnt/rootfs
-          BOOT_DIR="/mnt/rootfs/boot"
-
-          # Download kernel headers for DTS preprocessing
-          sudo apt-get install -y gcc device-tree-compiler >/dev/null 2>&1
-          KERNEL_VER=$(sudo ls /mnt/rootfs/lib/modules/ | head -1)
-          echo "Kernel: ${KERNEL_VER}"
-
-          # Get dt-bindings headers from kernel source
-          mkdir -p /tmp/dt-bindings
-          curl -fsSL "https://raw.githubusercontent.com/torvalds/linux/v${KERNEL_VER}/include/dt-bindings/gpio/gpio.h" \
-            -o /tmp/dt-bindings/gpio.h 2>/dev/null || true
-          mkdir -p /tmp/dt-bindings/gpio /tmp/dt-bindings/leds /tmp/dt-bindings/pinctrl /tmp/dt-bindings/soc
-
-          # Download all needed dt-bindings
-          for f in "gpio/gpio.h" "leds/common.h" "pinctrl/rockchip.h" "soc/rockchip,vop2.h"; do
-            curl -fsSL "https://raw.githubusercontent.com/torvalds/linux/v${KERNEL_VER}/include/dt-bindings/${f}" \
-              -o "/tmp/dt-bindings/${f}" 2>/dev/null || true
-          done
-
-          # Also need the rk3568.dtsi from the image's dtb directory
-          # Copy from the image itself
-          sudo cp ${BOOT_DIR}/dtb/rockchip/rk3568.dtsi /tmp/dt-bindings/ 2>/dev/null || true
-
-          # Compile DTS
-          DTS_SRC=$(find ${{ github.workspace }} -name "rk3568-yf-023d-v6.dts" 2>/dev/null | head -1)
-          cpp -nostdinc -I /tmp/dt-bindings -I /tmp/dt-bindings/gpio -D__DTS__ -x assembler-with-cpp "${DTS_SRC}" | \
-            dtc -I dts -O dtb -i /tmp/dt-bindings -o /tmp/rk3568-yf-023d-v6.dtb -
-
-          if [ ! -s /tmp/rk3568-yf-023d-v6.dtb ]; then
-            echo "ERROR: DTB compilation failed"
-            sudo umount /mnt/rootfs
-            sudo losetup -d "${LOOP}"
-            exit 1
-          fi
-          echo "DTB compiled: $(ls -lh /tmp/rk3568-yf-023d-v6.dtb)"
-
-          # Install DTB
-          sudo cp /tmp/rk3568-yf-023d-v6.dtb "${BOOT_DIR}/dtb/rockchip/"
-
-          # Update boot config
-          for conf in "${BOOT_DIR}/armbianEnv.txt" "${BOOT_DIR}/extlinux/extlinux.conf"; do
-            if [ -f "$conf" ]; then
-              sudo sed -i 's/rk3568-rock-3b.dtb/rk3568-yf-023d-v6.dtb/g' "$conf"
-              echo "Updated: $conf"
-            fi
-          done
-
-          sudo umount /mnt/rootfs
-          sudo losetup -d "${LOOP}"
-
-          gzip -9 /tmp/rebuilt.img
-          cp /tmp/rebuilt.img.gz "${IMG_GZ}"
-          echo "Done"
-
       - name: Upload
         uses: softprops/action-gh-release@v1
         if: ${{ env.PACKAGED_STATUS == 'success' && !cancelled() }}
@@ -191,12 +102,14 @@ jobs:
           body: |
             Armbian for Young-Feel YF-023D v6 RK3568
             
-            Based on Rock-3B (correct RK3568 u-boot)
-            Custom DTB: rk3568-yf-023d-v6.dtb
+            Based on Rock-3B image (correct RK3568 u-boot + DTB)
             Kernel: 6.12.y stable
             
+            Rock-3B DTB is compatible with YF-023D for basic booting
+            (same RK3568 SoC, same memory, same UART).
+            
             Default: root / 1234
-            Install: armbian-install
+            Install to eMMC: armbian-install
           files: ${{ env.PACKAGED_OUTPUTPATH }}/*
           make_latest: true
         env:
