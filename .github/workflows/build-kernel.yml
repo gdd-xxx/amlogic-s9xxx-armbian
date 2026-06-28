@@ -81,35 +81,136 @@ jobs:
           
           echo "Custom DTS added"
 
-      - name: Configure kernel
+      - name: Configure kernel (minimal for RK3568)
         run: |
           cd /tmp/kernel
+          # Use defconfig as base
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
           
-          # Enable MAE0621 driver
-          scripts/config --enable CONFIG_MAXIO_PHY
-          
-          # Ensure RK3568 support
+          # Enable only essential RK3568 features
           scripts/config --enable CONFIG_ARCH_ROCKCHIP
           scripts/config --enable CONFIG_SMP
           scripts/config --enable CONFIG_CPUFREQ_DT
           
-          # Enable common features
+          # Enable MAE0621 driver
+          scripts/config --enable CONFIG_MAXIO_PHY
+          scripts/config --module CONFIG_MAXIO_PHY
+          
+          # Enable networking essentials
+          scripts/config --enable CONFIG_NET
+          scripts/config --enable CONFIG_INET
+          scripts/config --enable CONFIG_NETDEVICES
+          scripts/config --enable CONFIG_ETHERNET
+          scripts/config --enable CONFIG_NET_VENDOR_ROCKCHIP
+          scripts/config --enable CONFIG_STMMAC_ETH
+          scripts/config --enable CONFIG_DWMAC_ROCKCHIP
+          scripts/config --enable CONFIG_PHY_ROCKCHIP_INNO_USB2
+          scripts/config --enable CONFIG_PHY_ROCKCHIP_NANENG_COMBPHY
+          
+          # Enable filesystem essentials
           scripts/config --enable CONFIG_EXT4_FS
           scripts/config --enable CONFIG_BTRFS_FS
-          scripts/config --enable CONFIG_NFS_FS
+          scripts/config --enable CONFIG_F2FS_FS
+          scripts/config --enable CONFIG_VFAT_FS
+          scripts/config --enable CONFIG_FAT_FS
+          scripts/config --enable CONFIG_NTFS3_FS
+          scripts/config --enable CONFIG_SQUASHFS
+          
+          # Enable USB
+          scripts/config --enable CONFIG_USB
+          scripts/config --enable CONFIG_USB_SUPPORT
           scripts/config --enable CONFIG_USB_DWC3
           scripts/config --enable CONFIG_USB_DWC3_OF_SIMPLE
           scripts/config --enable CONFIG_USB_XHCI_HCD
+          scripts/config --enable CONFIG_USB_EHCI_HCD
+          scripts/config --enable CONFIG_USB_OHCI_HCD
+          scripts/config --enable CONFIG_USB_STORAGE
+          scripts/config --enable CONFIG_USB_UAS
+          
+          # Enable MMC/SD
+          scripts/config --enable CONFIG_MMC
+          scripts/config --enable CONFIG_MMC_SDHCI
+          scripts/config --enable CONFIG_MMC_SDHCI_PLTFM
           scripts/config --enable CONFIG_MMC_SDHCI_OF_DWCMSHC
+          scripts/config --enable CONFIG_MMC_DW
+          scripts/config --enable CONFIG_MMC_DW_ROCKCHIP
           
-          # Enable GPU/NPU/VPU
+          # Enable GPU (Panfrost for Mali)
+          scripts/config --enable CONFIG_DRM
           scripts/config --enable CONFIG_DRM_PANFROST
-          scripts/config --enable CONFIG_ROCKCHIP_RKNPU
-          scripts/config --enable CONFIG_ROCKCHIP_VDEC2
-          scripts/config --enable CONFIG_ROCKCHIP_VCODEC
+          scripts/config --enable CONFIG_DRM_ROCKCHIP
+          scripts/config --enable CONFIG_FB
+          scripts/config --enable CONFIG_FRAMEBUFFER_CONSOLE
           
+          # Enable HDMI
+          scripts/config --enable CONFIG_DRM_DW_HDMI
+          scripts/config --enable CONFIG_DRM_DW_HDMI_I2S_AUDIO
+          
+          # Enable NPU/RKVDEC/RKVENC (vendor drivers, may not compile with mainline)
+          scripts/config --disable CONFIG_ROCKCHIP_RKNPU
+          scripts/config --disable CONFIG_ROCKCHIP_VDEC2
+          scripts/config --disable CONFIG_ROCKCHIP_VCODEC
+          
+          # Disable problematic drivers that cause build errors
+          scripts/config --disable CONFIG_SND_SOC_RCAR
+          scripts/config --disable CONFIG_CLK_IMX8MP_AUDIOMIX
+          scripts/config --disable CONFIG_SND_SOC_IMX
+          scripts/config --disable CONFIG_SND_SOC_FSL_ASOC
+          scripts/config --disable CONFIG_SND_SOC_FSL_MICFIL
+          scripts/config --disable CONFIG_SND_SOC_SOF
+          scripts/config --disable CONFIG_SND_SOC_ADI
+          scripts/config --disable CONFIG_SND_SOC_IMG
+          scripts/config --disable CONFIG_SND_SOC_MTK
+          scripts/config --disable CONFIG_SND_SOC_STI
+          scripts/config --disable CONFIG_SND_SOC_XILINX
+          
+          # Enable I2C for PMIC
+          scripts/config --enable CONFIG_I2C
+          scripts/config --enable CONFIG_I2C_CHARDEV
+          scripts/config --enable CONFIG_I2C_RK3X
+          
+          # Enable SPI
+          scripts/config --enable CONFIG_SPI
+          scripts/config --enable CONFIG_SPI_ROCKCHIP_SFC
+          
+          # Enable GPIO
+          scripts/config --enable CONFIG_GPIO_CDEV
+          scripts/config --enable CONFIG_GPIO_SYSCON
+          
+          # Enable PWM
+          scripts/config --enable CONFIG_PWM
+          scripts/config --enable CONFIG_PWM_ROCKCHIP
+          
+          # Enable thermal
+          scripts/config --enable CONFIG_THERMAL
+          scripts/config --enable CONFIG_ROCKCHIP_THERMAL
+          
+          # Enable RTC
+          scripts/config --enable CONFIG_RTC_CLASS
+          scripts/config --enable CONFIG_RTC_DRV_PCF8563
+          
+          # Enable crypto
+          scripts/config --enable CONFIG_CRYPTO
+          scripts/config --enable CONFIG_CRYPTO_USER
+          scripts/config --enable CONFIG_CRYPTO_TEST
+          
+          # Enable power management
+          scripts/config --enable CONFIG_PM
+          scripts/config --enable CONFIG_PM_SLEEP
+          scripts/config --enable CONFIG_SUSPEND
+          scripts/config --enable CONFIG_HIBERNATION
+          
+          # Enable LED
+          scripts/config --enable CONFIG_LEDS_CLASS
+          scripts/config --enable CONFIG_LEDS_GPIO
+          
+          # Enable watchdog
+          scripts/config --enable CONFIG_WATCHDOG
+          scripts/config --enable CONFIG_DW_WATCHDOG
+          
+          # Run olddefconfig to resolve dependencies
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+          
           echo "Kernel configured"
 
       - name: Compile kernel
@@ -150,7 +251,8 @@ jobs:
             Features:
             - MAE0621A Ethernet PHY driver
             - Custom DTS for YF-023D
-            - NPU/VPU/USB support
+            - GPU (Panfrost) support
+            - HDMI output
             
             Default login: root / 1234
           files: kernel-rk3568-yf023d.tar.gz
