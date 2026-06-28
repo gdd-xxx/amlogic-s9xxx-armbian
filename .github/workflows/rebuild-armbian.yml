@@ -74,7 +74,7 @@ jobs:
           sudo chown -R runner:runner /builder
           echo "status=success" >> ${GITHUB_OUTPUT}
 
-      - name: Get latest Armbian base image
+      - name: Get Armbian base image from ophub releases
         id: down
         working-directory: /builder
         if: ${{ steps.init.outputs.status == 'success' && !cancelled() }}
@@ -82,39 +82,32 @@ jobs:
           armbian_buildpath="build/output/images"
           mkdir -p "${armbian_buildpath}"
           ln -sf /builder/build ${{ github.workspace }}/build
+          ln -sf /builder/build /home/runner/work/_actions/ophub/amlogic-s9xxx-armbian/main/build
 
-          # Download latest Armbian from official releases
+          # Query latest trunk Armbian image from ophub releases
           latest_version=$(curl -s \
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              "https://api.github.com/repos/armbian/build/releases?per_page=10" | \
-              jq -r --arg RTK "Armbian_${{ inputs.set_release }}_arm64_" \
-              '[.[] | select(.tag_name | contains($RTK))] |
+              "https://api.github.com/repos/ophub/amlogic-s9xxx-armbian/releases?per_page=5" | \
+              jq -r --arg RELEASE "${{ inputs.set_release }}" \
+              '[.[] | select(.tag_name | contains($RELEASE) and contains("server"))] |
               map(.assets[] | select(.name | contains("-trunk_") and endswith(".img.gz"))) |
               sort_by(.updated_at) | reverse | .[0] |
               {url: .browser_download_url, name: .name}')
 
           if [[ -z "${latest_version}" || "${latest_version}" == "null" ]]; then
-              echo "No official Armbian found, trying ophub releases..."
-              latest_version=$(curl -s \
-                  -H "Accept: application/vnd.github+json" \
-                  -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-                  "https://api.github.com/repos/armbian/build/releases/tags/v25.02" | \
-                  jq -r '.assets[] | select(.name | contains("arm64") and contains("${{ inputs.set_release }}")) | select(.name | endswith(".img.gz")) | {url: .browser_download_url, name: .name}' | head -1)
+              echo "Error: No Armbian image found"
+              exit 1
           fi
 
-          if [[ -z "${latest_version}" || "${latest_version}" == "null" ]]; then
-              echo "Downloading Armbian minimal image..."
-              curl -fsSL -o "${armbian_buildpath}/armbian.img.gz" \
-                "https://dl.armbian.com/rockchip-rk3568/Armbian_${{ inputs.set_release }}_trunk_6.12.50_arm64.img.gz"
-          else
-              armbian_url="$(echo ${latest_version} | jq -r '.url')"
-              armbian_filename="$(echo ${latest_version} | jq -r '.name')"
-              echo "Downloading: ${armbian_filename}"
-              curl -fsSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-                   "${armbian_url}" -o "${armbian_buildpath}/${armbian_filename}"
-          fi
+          armbian_url="$(echo ${latest_version} | jq -r '.url')"
+          armbian_filename="$(echo ${latest_version} | jq -r '.name')"
 
+          echo "Downloading: ${armbian_filename}"
+          curl -fsSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+               "${armbian_url}" -o "${armbian_buildpath}/${armbian_filename}"
+
+          echo "build_tag=Armbian_${{ inputs.set_release }}_arm64_${{ inputs.armbian_edition }}_$(date +"%Y.%m")" >> ${GITHUB_ENV}
           echo "status=success" >> ${GITHUB_OUTPUT}
 
       - name: Build custom Armbian image
@@ -126,7 +119,7 @@ jobs:
           armbian_board: rk3568
           armbian_kernel: 6.12.y
           auto_kernel: true
-          kernel_repo: gdd-xxx/kernel
+          kernel_repo: gdd-xxx/amlogic-s9xxx-armbian
           kernel_usage: stable
           armbian_fstype: ${{ inputs.armbian_fstype }}
           builder_name: yf023d
@@ -135,16 +128,16 @@ jobs:
         uses: softprops/action-gh-release@v1
         if: ${{ env.PACKAGED_STATUS == 'success' && !cancelled() }}
         with:
-          tag_name: armbian-yf023d-${{ inputs.set_release }}
+          tag_name: ${{ env.build_tag }}
           name: "Armbian ${{ inputs.set_release }} for YF-023D RK3568"
           body: |
             Armbian image for Young-Feel YF-023D v6 RK3568 Board
             
             Features:
             - Custom kernel with MAE0621 Ethernet PHY driver
-            - HDMI output support
+            - HDMI output
             - WiFi/BT support
-            - eMMC/SD/NAND support
+            - eMMC/SD support
             
             Default login: root / 1234
             Install to eMMC: armbian-install
