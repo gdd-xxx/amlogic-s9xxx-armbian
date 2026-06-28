@@ -101,12 +101,10 @@ jobs:
             echo "ERROR: No rebuilt image found"
             exit 1
           fi
-          echo "Rebuilt image: ${IMG_GZ}"
 
           cp "${IMG_GZ}" /tmp/rebuilt.img.gz
           gzip -d /tmp/rebuilt.img.gz
 
-          # Set up loop device
           LOOP=$(sudo losetup -fP --show /tmp/rebuilt.img)
           sudo partprobe "${LOOP}"
           sleep 2
@@ -116,7 +114,6 @@ jobs:
           for p in ${LOOP}p1 ${LOOP}p2; do
             if [ -b "$p" ]; then
               FSTYPE=$(sudo blkid -s TYPE -o value "$p" 2>/dev/null)
-              echo "Partition $p: ${FSTYPE}"
               if [ "$FSTYPE" = "ext4" ]; then
                 ROOT_PART="$p"
               fi
@@ -124,28 +121,40 @@ jobs:
           done
 
           if [ -z "$ROOT_PART" ]; then
-            echo "ERROR: No ext4 partition found"
+            echo "ERROR: No ext4 partition"
             sudo losetup -d "${LOOP}"
             exit 1
           fi
 
           sudo mkdir -p /mnt/rootfs
           sudo mount "${ROOT_PART}" /mnt/rootfs
+          BOOT_DIR="/mnt/rootfs/boot"
 
-          # Compile DTS with cpp preprocessing (DTS uses #include)
-          DTS_SRC=$(find ${{ github.workspace }} -name "rk3568-yf-023d-v6.dts" 2>/dev/null | head -1)
-          if [ -z "$DTS_SRC" ]; then
-            echo "ERROR: No DTS file found"
-            sudo umount /mnt/rootfs
-            sudo losetup -d "${LOOP}"
-            exit 1
-          fi
-
+          # Download kernel headers for DTS preprocessing
           sudo apt-get install -y gcc device-tree-compiler >/dev/null 2>&1
+          KERNEL_VER=$(sudo ls /mnt/rootfs/lib/modules/ | head -1)
+          echo "Kernel: ${KERNEL_VER}"
 
-          # Preprocess with cpp, then compile with dtc
-          cpp -nostdinc -I /usr/include -D__DTS__ -x assembler-with-cpp "${DTS_SRC}" | \
-            dtc -I dts -O dtb -o /tmp/rk3568-yf-023d-v6.dtb -
+          # Get dt-bindings headers from kernel source
+          mkdir -p /tmp/dt-bindings
+          curl -fsSL "https://raw.githubusercontent.com/torvalds/linux/v${KERNEL_VER}/include/dt-bindings/gpio/gpio.h" \
+            -o /tmp/dt-bindings/gpio.h 2>/dev/null || true
+          mkdir -p /tmp/dt-bindings/gpio /tmp/dt-bindings/leds /tmp/dt-bindings/pinctrl /tmp/dt-bindings/soc
+
+          # Download all needed dt-bindings
+          for f in "gpio/gpio.h" "leds/common.h" "pinctrl/rockchip.h" "soc/rockchip,vop2.h"; do
+            curl -fsSL "https://raw.githubusercontent.com/torvalds/linux/v${KERNEL_VER}/include/dt-bindings/${f}" \
+              -o "/tmp/dt-bindings/${f}" 2>/dev/null || true
+          done
+
+          # Also need the rk3568.dtsi from the image's dtb directory
+          # Copy from the image itself
+          sudo cp ${BOOT_DIR}/dtb/rockchip/rk3568.dtsi /tmp/dt-bindings/ 2>/dev/null || true
+
+          # Compile DTS
+          DTS_SRC=$(find ${{ github.workspace }} -name "rk3568-yf-023d-v6.dts" 2>/dev/null | head -1)
+          cpp -nostdinc -I /tmp/dt-bindings -I /tmp/dt-bindings/gpio -D__DTS__ -x assembler-with-cpp "${DTS_SRC}" | \
+            dtc -I dts -O dtb -i /tmp/dt-bindings -o /tmp/rk3568-yf-023d-v6.dtb -
 
           if [ ! -s /tmp/rk3568-yf-023d-v6.dtb ]; then
             echo "ERROR: DTB compilation failed"
@@ -156,10 +165,7 @@ jobs:
           echo "DTB compiled: $(ls -lh /tmp/rk3568-yf-023d-v6.dtb)"
 
           # Install DTB
-          BOOT_DIR="/mnt/rootfs/boot"
-          sudo mkdir -p "${BOOT_DIR}/dtb/rockchip"
           sudo cp /tmp/rk3568-yf-023d-v6.dtb "${BOOT_DIR}/dtb/rockchip/"
-          echo "DTB installed"
 
           # Update boot config
           for conf in "${BOOT_DIR}/armbianEnv.txt" "${BOOT_DIR}/extlinux/extlinux.conf"; do
