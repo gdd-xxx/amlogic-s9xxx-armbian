@@ -1,4 +1,4 @@
-name: Build Armbian for YF-023D (rock-3b base)
+name: Build Armbian for YF-023D
 
 on:
   workflow_dispatch:
@@ -7,27 +7,10 @@ env:
   TZ: Etc/UTC
 
 jobs:
-  setup:
-    runs-on: ubuntu-24.04
-    outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-    steps:
-      - id: set-matrix
-        run: |
-          MATRIX='{"include":[{"release":"bookworm"},{"release":"trixie"}]}'
-          echo "matrix=${MATRIX}" >> "${GITHUB_OUTPUT}"
-
   build:
-    needs: setup
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
-
-    name: build-${{ matrix.release }}
 
     steps:
       - name: Checkout
@@ -63,9 +46,44 @@ jobs:
           sudo chown -R runner:runner /builder
           echo "status=success" >> ${GITHUB_OUTPUT}
 
-      - name: Build Armbian with rock-3b board (includes proper u-boot)
+      - name: Download Armbian trunk image
+        id: down
+        working-directory: /builder
+        run: |
+          armbian_buildpath="build/output/images"
+          mkdir -p "${armbian_buildpath}"
+          ln -sf /builder/build ${{ github.workspace }}/build
+          ln -sf /builder/build /home/runner/work/_actions/ophub/amlogic-s9xxx-armbian/main/build
+
+          # Query latest trunk image from ophub releases
+          latest_version=$(curl -s \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/ophub/amlogic-s9xxx-armbian/releases?per_page=10" | \
+              jq -r '
+              [.[] | select(.tag_name | contains("bookworm") and contains("server"))] |
+              map(.assets[] | select(.name | contains("-trunk_") and endswith(".img.gz"))) |
+              sort_by(.updated_at) | reverse | .[0] |
+              {url: .browser_download_url, name: .name}')
+
+          if [[ -z "${latest_version}" || "${latest_version}" == "null" ]]; then
+              echo "Error: No Armbian image found"
+              exit 1
+          fi
+
+          armbian_url="$(echo ${latest_version} | jq -r '.url')"
+          armbian_filename="$(echo ${latest_version} | jq -r '.name')"
+
+          echo "Downloading: ${armbian_filename}"
+          curl -fsSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+               "${armbian_url}" -o "${armbian_buildpath}/${armbian_filename}"
+
+          echo "Downloaded: $(ls -lh ${armbian_buildpath}/${armbian_filename})"
+          echo "status=success" >> ${GITHUB_OUTPUT}
+
+      - name: Build Armbian with rock-3b board
         uses: ophub/amlogic-s9xxx-armbian@main
-        if: ${{ steps.disk.outputs.status == 'success' && !cancelled() }}
+        if: ${{ steps.down.outputs.status == 'success' && !cancelled() }}
         with:
           build_target: armbian
           armbian_path: build/output/images/*.img.gz
@@ -80,10 +98,6 @@ jobs:
       - name: Replace DTB and update boot config
         if: ${{ env.PACKAGED_STATUS == 'success' && !cancelled() }}
         run: |
-          echo "=== Current output ==="
-          ls -lh ${{ env.PACKAGED_OUTPUTPATH }}/ 2>/dev/null
-
-          # Find the Armbian image
           IMG_FILE=$(find ${{ env.PACKAGED_OUTPUTPATH }} -name "*.img.gz" | head -1)
           if [ -z "$IMG_FILE" ]; then
             echo "ERROR: No image found"
@@ -95,76 +109,53 @@ jobs:
           cp "${IMG_FILE}" /tmp/work.img.gz
           gzip -d /tmp/work.img.gz
 
-          # Mount and modify
+          # Mount
           LOOP=$(sudo losetup -fP --show /tmp/work.img)
           sudo partprobe "${LOOP}"
-
-          # Mount rootfs
           sudo mkdir -p /mnt/rootfs
           sudo mount "${LOOP}p2" /mnt/rootfs
-
-          # Mount boot
           sudo mkdir -p /mnt/boot
           sudo mount "${LOOP}p1" /mnt/boot
 
-          echo "=== Boot ==="
-          sudo ls -la /mnt/boot/
-
-          # Find our custom DTB
-          DTB_SRC=$(find ${{ github.workspace }} -name "rk3568-yf-023d-v6.dtb" 2>/dev/null | head -1)
-          if [ -z "$DTB_SRC" ]; then
-            # Compile from DTS
-            DTS_SRC=$(find ${{ github.workspace }} -name "rk3568-yf-023d-v6.dts" 2>/dev/null | head -1)
-            if [ -n "$DTS_SRC" ]; then
-              echo "Compiling DTS..."
-              sudo apt-get install -y device-tree-compiler
-              dtc -I dts -O dtb -o /tmp/rk3568-yf-023d-v6.dtb "${DTS_SRC}"
-              DTB_SRC="/tmp/rk3568-yf-023d-v6.dtb"
-            fi
+          # Copy custom DTB
+          DTS_SRC=$(find ${{ github.workspace }} -name "rk3568-yf-023d-v6.dts" 2>/dev/null | head -1)
+          if [ -n "$DTS_SRC" ]; then
+            sudo apt-get install -y device-tree-compiler >/dev/null 2>&1
+            dtc -I dts -O dtb -o /tmp/rk3568-yf-023d-v6.dtb "${DTS_SRC}"
+            sudo cp /tmp/rk3568-yf-023d-v6.dtb /mnt/boot/dtb/rockchip/
+            echo "Custom DTB installed"
           fi
 
-          if [ -n "$DTB_SRC" ]; then
-            echo "Replacing DTB: ${DTB_SRC}"
-            sudo cp "${DTB_SRC}" /mnt/boot/dtb/rockchip/rk3568-yf-023d-v6.dtb
-          else
-            echo "WARNING: No custom DTB found, keeping rock-3b DTB"
-          fi
-
-          # Update boot config to point to our DTB
+          # Update boot config
           for conf in /mnt/boot/armbianEnv.txt /mnt/boot/extlinux/extlinux.conf; do
             if [ -f "$conf" ]; then
-              echo "Updating $conf"
-              sudo sed -i 's|fdtfile=rockchip/rk3568-rock-3b.dtb|fdtfile=rockchip/rk3568-yf-023d-v6.dtb|g' "$conf" 2>/dev/null || true
-              sudo sed -i 's|FDT /dtb/rockchip/rk3568-rock-3b.dtb|FDT /dtb/rockchip/rk3568-yf-023d-v6.dtb|g' "$conf" 2>/dev/null || true
-              cat "$conf"
+              sudo sed -i 's|rk3568-rock-3b.dtb|rk3568-yf-023d-v6.dtb|g' "$conf"
+              echo "Updated: $conf"
             fi
           done
 
-          # Cleanup
           sudo umount /mnt/boot 2>/dev/null
           sudo umount /mnt/rootfs 2>/dev/null
           sudo losetup -d "${LOOP}"
 
-          # Recompress
           gzip -9 /tmp/work.img
-          mv /tmp/work.img.gz "${IMG_FILE}"
-          echo "DTB replaced and boot config updated"
+          cp /tmp/work.img.gz "${IMG_FILE}"
+          echo "Done"
 
       - name: Upload
         uses: softprops/action-gh-release@v1
         if: ${{ env.PACKAGED_STATUS == 'success' && !cancelled() }}
         with:
-          tag_name: armbian-yf023d-${{ matrix.release }}
-          name: "Armbian ${{ matrix.release }} for YF-023D (RK3568)"
+          tag_name: armbian-yf023d-bookworm
+          name: "Armbian bookworm for YF-023D (RK3568)"
           body: |
-            Armbian for Young-Feel YF-023D v6 RK3568 Board
+            Armbian for Young-Feel YF-023D v6 RK3568
             
-            Based on Rock-3B image (proper u-boot for RK3568)
+            Based on Rock-3B (correct RK3568 u-boot)
             Custom DTB: rk3568-yf-023d-v6.dtb
-            Kernel: 6.12.y (stable)
+            Kernel: 6.12.y stable
             
-            Default login: root / 1234
-            Install: armbian-install
+            Default: root / 1234
           files: ${{ env.PACKAGED_OUTPUTPATH }}/*
           make_latest: true
         env:
