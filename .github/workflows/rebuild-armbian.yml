@@ -40,90 +40,50 @@ jobs:
           mkdir -p /tmp/kernel-extract
           tar xzf /tmp/kernel-pkg/custom.tar.gz -C /tmp/kernel-extract/
           echo "Kernel extracted"
-          find /tmp/kernel-extract -type f | head -30
+          sudo find /tmp/kernel-extract -type f | head -30
 
       - name: Build custom image
         run: |
           IMG="/tmp/work/base.img"
-
-          # Get partition info
-          echo "=== Partition table ==="
-          parted -s "${IMG}" unit s print
-
-          # Find Linux partitions
-          BOOT_START=$(parted -s "${IMG}" unit s print | grep "^.*1.*fat32\|^.*1.*fat16\|^.*1.*boot" | awk '{print $2}' | sed 's/s$//')
-          ROOT_START=$(parted -s "${IMG}" unit s print | grep "^.*2.*ext4\|^.*2.*linux-swap" | awk '{print $2}' | sed 's/s$//')
-
-          # Fallback: assume standard layout
-          if [ -z "$BOOT_START" ]; then
-              # Use loset to detect
-              LOOP=$(sudo losetup -fP --show "${IMG}")
-              sudo partprobe "${LOOP}"
-              BOOT_START=$(sudo fdisk -l "${IMG}" | grep "${LOOP}p1" | awk '{print $2}')
-              ROOT_START=$(sudo fdisk -l "${IMG}" | grep "${LOOP}p2" | awk '{print $2}')
-          fi
-
-          echo "Boot start: ${BOOT_START}"
-          echo "Root start: ${ROOT_START}"
-
-          # Use loset with partition scanning
           LOOP=$(sudo losetup -fP --show "${IMG}")
           echo "Loop: ${LOOP}"
+          sudo partprobe "${LOOP}"
 
-          sudo mkdir -p /mnt/boot /mnt/rootfs
+          # Single partition layout - mount to /mnt/rootfs
+          sudo mkdir -p /mnt/rootfs
+          sudo mount "${LOOP}p1" /mnt/rootfs
 
-          # Mount partitions
-          if [ -b "${LOOP}p1" ]; then
-              sudo mount "${LOOP}p1" /mnt/boot
-          elif [ -b "${LOOP}1" ]; then
-              sudo mount "${LOOP}1" /mnt/boot
-          fi
-
-          if [ -b "${LOOP}p2" ]; then
-              sudo mount "${LOOP}p2" /mnt/rootfs
-          elif [ -b "${LOOP}2" ]; then
-              sudo mount "${LOOP}2" /mnt/rootfs
-          fi
-
+          # Boot is inside rootfs at /boot
+          BOOT_DIR="/mnt/rootfs/boot"
           echo "=== Boot ==="
-          ls -la /mnt/boot/ 2>/dev/null | head -20
-          echo "=== Rootfs ==="
-          ls -la /mnt/rootfs/ 2>/dev/null | head -20
-
-          # Find boot directory with kernel
-          BOOT_DIR="/mnt/boot"
-          if [ -d "/mnt/boot/dtb" ] || [ -f "/mnt/boot/Image" ]; then
-              BOOT_DIR="/mnt/boot"
-          elif [ -d "/mnt/boot/extlinux" ]; then
-              BOOT_DIR="/mnt/boot"
-          fi
+          sudo ls -la "${BOOT_DIR}/" | head -20
 
           # Find existing kernel version
-          KVER=$(ls /mnt/rootfs/lib/modules/ 2>/dev/null | head -1)
+          KVER=$(sudo ls /mnt/rootfs/lib/modules/ 2>/dev/null | head -1)
           echo "Existing kernel: ${KVER}"
 
-          # Find kernel version from our custom kernel
-          NEW_KVER=$(ls /tmp/kernel-extract/lib/modules/ 2>/dev/null | head -1)
+          # Find new kernel version
+          NEW_KVER=$(sudo ls /tmp/kernel-extract/lib/modules/ 2>/dev/null | head -1)
           echo "New kernel: ${NEW_KVER}"
 
           # Backup and replace Image
           if [ -f "${BOOT_DIR}/Image" ]; then
               sudo mv "${BOOT_DIR}/Image" "${BOOT_DIR}/Image.old"
           fi
-          NEW_IMAGE=$(find /tmp/kernel-extract -name "Image" -type f | head -1)
+          NEW_IMAGE=$(sudo find /tmp/kernel-extract -name "Image" -type f | head -1)
           if [ -n "$NEW_IMAGE" ]; then
               sudo cp "$NEW_IMAGE" "${BOOT_DIR}/Image"
               echo "Replaced Image"
           else
-              echo "ERROR: No Image found in custom kernel!"
+              echo "ERROR: No Image found!"
               exit 1
           fi
 
           # Copy DTBs
-          sudo mkdir -p "${BOOT_DIR}/dtb"
-          find /tmp/kernel-extract -name "*.dtb" -exec sudo cp {} "${BOOT_DIR}/dtb/" \; 2>/dev/null
-          find /tmp/kernel-extract -name "*.dtb" -exec sudo cp {} "${BOOT_DIR}/" \; 2>/dev/null
-          echo "DTBs copied: $(find ${BOOT_DIR} -name '*.dtb' | wc -l)"
+          sudo mkdir -p "${BOOT_DIR}/dtb/rockchip"
+          sudo find /tmp/kernel-extract -name "*.dtb" -exec cp {} "${BOOT_DIR}/dtb/rockchip/" \; 2>/dev/null || true
+          sudo find /tmp/kernel-extract -name "*.dtb" -exec cp {} "${BOOT_DIR}/dtb/" \; 2>/dev/null || true
+          echo "DTBs: $(sudo find ${BOOT_DIR} -name '*.dtb' | wc -l)"
 
           # Replace modules
           if [ -n "$KVER" ] && [ -d "/mnt/rootfs/lib/modules/${KVER}" ]; then
@@ -135,16 +95,17 @@ jobs:
               echo "Modules replaced: ${NEW_KVER}"
           fi
 
-          # Update extlinux.conf if exists
-          if [ -f "${BOOT_DIR}/extlinux/extlinux.conf" ]; then
-              sudo sed -i "s|/lib/modules/${KVER}|/lib/modules/${NEW_KVER}|g" "${BOOT_DIR}/extlinux/extlinux.conf" 2>/dev/null || true
-              echo "Updated extlinux.conf"
-          fi
+          # Update boot config
+          for conf in "${BOOT_DIR}/extlinux/extlinux.conf" "${BOOT_DIR}/armbianEnv.txt"; do
+              if [ -f "$conf" ]; then
+                  sudo sed -i "s|${KVER}|${NEW_KVER}|g" "$conf" 2>/dev/null || true
+                  echo "Updated: $conf"
+              fi
+          done
 
           # Cleanup
-          sudo umount /mnt/boot 2>/dev/null
-          sudo umount /mnt/rootfs 2>/dev/null
-          sudo losetup -d "${LOOP}" 2>/dev/null
+          sudo umount /mnt/rootfs
+          sudo losetup -d "${LOOP}"
           echo "Build complete"
 
       - name: Compress and upload
@@ -165,7 +126,6 @@ jobs:
             
             Custom kernel: MAE0621 PHY + custom DTS
             Default login: root / 1234
-            Install: armbian-install
           files: /tmp/work/Armbian_bookworm_arm64_yf023d_*.img.gz
           make_latest: true
         env:
