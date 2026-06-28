@@ -19,115 +19,141 @@ jobs:
       - name: Download Armbian base image
         run: |
           mkdir -p /tmp/work
-          # Download bookworm trunk image from ophub
+          ARMBIAN_TAG="Armbian_bookworm_arm64_server_2026.06"
+          ARMBIAN_FILE="Armbian_26.05.0-trunk_bookworm_arm64_6.18.33.img.gz"
+          echo "Downloading ${ARMBIAN_FILE}..."
           curl -fsSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/ophub/amlogic-s9xxx-armbian/releases?per_page=3" | \
-            jq -r '
-              [.[] | select(.tag_name | contains("bookworm") and contains("server"))] |
-              map(.assets[] | select(.name | contains("-trunk_") and contains("arm64") and endswith(".img.gz"))) |
-              sort_by(.updated_at) | reverse | .[0].browser_download_url' | \
-            xargs -I{} curl -fsSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "{}" -o /tmp/work/base.img.gz
-
+            -H "Accept: application/octet-stream" \
+            "https://github.com/ophub/amlogic-s9xxx-armbian/releases/download/${ARMBIAN_TAG}/${ARMBIAN_FILE}" \
+            -o /tmp/work/base.img.gz
           ls -lh /tmp/work/base.img.gz
           gzip -d /tmp/work/base.img.gz
           echo "Base image ready"
 
-      - name: Download and extract custom kernel
+      - name: Download custom kernel
         run: |
           mkdir -p /tmp/kernel-pkg
           curl -fsSL -L -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             "https://github.com/gdd-xxx/amlogic-s9xxx-armbian/releases/download/kernel-yf023d/kernel-rk3568-yf023d.tar.gz" \
             -o /tmp/kernel-pkg/custom.tar.gz
-
           ls -lh /tmp/kernel-pkg/custom.tar.gz
-          tar xzf /tmp/kernel-pkg/custom.tar.gz -C /tmp/kernel-pkg/
-          echo "Custom kernel extracted:"
-          find /tmp/kernel-pkg -type f | head -30
-          echo "---"
-          # Find Image
-          IMAGE=$(find /tmp/kernel-pkg -name "Image" -o -name "*.Image" | head -1)
-          echo "Image: ${IMAGE}"
-          # Find DTBs
-          find /tmp/kernel-pkg -name "*.dtb" | head -10
-          # Find modules
-          ls /tmp/kernel-pkg/lib/modules/ 2>/dev/null || echo "No modules dir at lib/modules"
-          find /tmp/kernel-pkg -path "*/modules/*" -name "modules.dep" | head -5
+          mkdir -p /tmp/kernel-extract
+          tar xzf /tmp/kernel-pkg/custom.tar.gz -C /tmp/kernel-extract/
+          echo "Kernel extracted"
+          find /tmp/kernel-extract -type f | head -30
 
-      - name: Build custom Armbian image
+      - name: Build custom image
         run: |
-          IMG="/tmp/work/base.img.gz"
-          [ -f "/tmp/work/base.img" ] && IMG="/tmp/work/base.img"
+          IMG="/tmp/work/base.img"
 
-          # Get loop device
-          sudo losetup -fP "${IMG}"
-          LOOP=$(sudo losetup -j "${IMG}" | awk '{print $1}')
-          echo "Loop device: ${LOOP}"
+          # Get partition info
+          echo "=== Partition table ==="
+          parted -s "${IMG}" unit s print
 
-          # List partitions
-          sudo fdisk -l "${IMG}"
-          sudo partprobe "${LOOP}"
+          # Find Linux partitions
+          BOOT_START=$(parted -s "${IMG}" unit s print | grep "^.*1.*fat32\|^.*1.*fat16\|^.*1.*boot" | awk '{print $2}' | sed 's/s$//')
+          ROOT_START=$(parted -s "${IMG}" unit s print | grep "^.*2.*ext4\|^.*2.*linux-swap" | awk '{print $2}' | sed 's/s$//')
 
-          # Mount boot partition (partition 1) and rootfs (partition 2)
+          # Fallback: assume standard layout
+          if [ -z "$BOOT_START" ]; then
+              # Use loset to detect
+              LOOP=$(sudo losetup -fP --show "${IMG}")
+              sudo partprobe "${LOOP}"
+              BOOT_START=$(sudo fdisk -l "${IMG}" | grep "${LOOP}p1" | awk '{print $2}')
+              ROOT_START=$(sudo fdisk -l "${IMG}" | grep "${LOOP}p2" | awk '{print $2}')
+          fi
+
+          echo "Boot start: ${BOOT_START}"
+          echo "Root start: ${ROOT_START}"
+
+          # Use loset with partition scanning
+          LOOP=$(sudo losetup -fP --show "${IMG}")
+          echo "Loop: ${LOOP}"
+
           sudo mkdir -p /mnt/boot /mnt/rootfs
 
-          # Try to identify partitions
-          sudo mount ${LOOP}p1 /mnt/boot 2>/dev/null || sudo mount ${LOOP}1 /mnt/boot 2>/dev/null || true
-          sudo mount ${LOOP}p2 /mnt/rootfs 2>/dev/null || sudo mount ${LOOP}2 /mnt/rootfs 2>/dev/null || true
+          # Mount partitions
+          if [ -b "${LOOP}p1" ]; then
+              sudo mount "${LOOP}p1" /mnt/boot
+          elif [ -b "${LOOP}1" ]; then
+              sudo mount "${LOOP}1" /mnt/boot
+          fi
 
-          echo "Boot partition:"
+          if [ -b "${LOOP}p2" ]; then
+              sudo mount "${LOOP}p2" /mnt/rootfs
+          elif [ -b "${LOOP}2" ]; then
+              sudo mount "${LOOP}2" /mnt/rootfs
+          fi
+
+          echo "=== Boot ==="
           ls -la /mnt/boot/ 2>/dev/null | head -20
-          echo "Rootfs partition:"
+          echo "=== Rootfs ==="
           ls -la /mnt/rootfs/ 2>/dev/null | head -20
 
-          # Find kernel version in existing image
+          # Find boot directory with kernel
+          BOOT_DIR="/mnt/boot"
+          if [ -d "/mnt/boot/dtb" ] || [ -f "/mnt/boot/Image" ]; then
+              BOOT_DIR="/mnt/boot"
+          elif [ -d "/mnt/boot/extlinux" ]; then
+              BOOT_DIR="/mnt/boot"
+          fi
+
+          # Find existing kernel version
           KVER=$(ls /mnt/rootfs/lib/modules/ 2>/dev/null | head -1)
-          echo "Existing kernel version: ${KVER}"
+          echo "Existing kernel: ${KVER}"
 
-          # Find and replace kernel Image
-          BOOT_DIR=$(find /mnt/boot -name "extlinux" -o -name "*.scr" -o -name "Image" 2>/dev/null | head -1 | xargs dirname 2>/dev/null)
-          [ -z "$BOOT_DIR" ] && BOOT_DIR="/mnt/boot"
-          echo "Boot dir: ${BOOT_DIR}"
+          # Find kernel version from our custom kernel
+          NEW_KVER=$(ls /tmp/kernel-extract/lib/modules/ 2>/dev/null | head -1)
+          echo "New kernel: ${NEW_KVER}"
 
-          # Backup existing kernel
-          [ -f "${BOOT_DIR}/Image" ] && sudo cp "${BOOT_DIR}/Image" "${BOOT_DIR}/Image.bak" 2>/dev/null || true
-
-          # Copy new kernel Image
-          NEW_IMAGE=$(find /tmp/kernel-pkg -name "Image" | head -1)
+          # Backup and replace Image
+          if [ -f "${BOOT_DIR}/Image" ]; then
+              sudo mv "${BOOT_DIR}/Image" "${BOOT_DIR}/Image.old"
+          fi
+          NEW_IMAGE=$(find /tmp/kernel-extract -name "Image" -type f | head -1)
           if [ -n "$NEW_IMAGE" ]; then
               sudo cp "$NEW_IMAGE" "${BOOT_DIR}/Image"
-              echo "Copied new Image to ${BOOT_DIR}/"
+              echo "Replaced Image"
+          else
+              echo "ERROR: No Image found in custom kernel!"
+              exit 1
           fi
 
           # Copy DTBs
-          sudo mkdir -p ${BOOT_DIR}/dtb
-          find /tmp/kernel-pkg -name "*.dtb" -exec sudo cp {} ${BOOT_DIR}/dtb/ \; 2>/dev/null || true
-          find /tmp/kernel-pkg -name "*.dtb" -exec sudo cp {} ${BOOT_DIR}/ \; 2>/dev/null || true
-          echo "DTBs copied"
+          sudo mkdir -p "${BOOT_DIR}/dtb"
+          find /tmp/kernel-extract -name "*.dtb" -exec sudo cp {} "${BOOT_DIR}/dtb/" \; 2>/dev/null
+          find /tmp/kernel-extract -name "*.dtb" -exec sudo cp {} "${BOOT_DIR}/" \; 2>/dev/null
+          echo "DTBs copied: $(find ${BOOT_DIR} -name '*.dtb' | wc -l)"
 
           # Replace modules
-          if [ -n "$KVER" ]; then
-              sudo rm -rf /mnt/rootfs/lib/modules/${KVER}
+          if [ -n "$KVER" ] && [ -d "/mnt/rootfs/lib/modules/${KVER}" ]; then
+              sudo rm -rf "/mnt/rootfs/lib/modules/${KVER}"
           fi
-          NEW_MODULES=$(find /tmp/kernel-pkg -path "*/lib/modules/*" -maxdepth 5 -type d | head -1 | sed 's|/lib/modules/.*||')
-          if [ -d "/tmp/kernel-pkg/lib/modules" ]; then
-              sudo cp -a /tmp/kernel-pkg/lib/modules /mnt/rootfs/lib/
-              echo "Modules copied"
+          if [ -n "$NEW_KVER" ] && [ -d "/tmp/kernel-extract/lib/modules/${NEW_KVER}" ]; then
+              sudo mkdir -p /mnt/rootfs/lib/modules
+              sudo cp -a "/tmp/kernel-extract/lib/modules/${NEW_KVER}" /mnt/rootfs/lib/modules/
+              echo "Modules replaced: ${NEW_KVER}"
           fi
 
-          echo "Boot dir contents:"
-          ls -la ${BOOT_DIR}/ 2>/dev/null
+          # Update extlinux.conf if exists
+          if [ -f "${BOOT_DIR}/extlinux/extlinux.conf" ]; then
+              sudo sed -i "s|/lib/modules/${KVER}|/lib/modules/${NEW_KVER}|g" "${BOOT_DIR}/extlinux/extlinux.conf" 2>/dev/null || true
+              echo "Updated extlinux.conf"
+          fi
 
           # Cleanup
-          sudo umount /mnt/boot 2>/dev/null || true
-          sudo umount /mnt/rootfs 2>/dev/null || true
-          sudo losetup -d "${LOOP}" 2>/dev/null || true
+          sudo umount /mnt/boot 2>/dev/null
+          sudo umount /mnt/rootfs 2>/dev/null
+          sudo losetup -d "${LOOP}" 2>/dev/null
+          echo "Build complete"
 
       - name: Compress and upload
         run: |
           cd /tmp/work
           gzip -9 base.img
-          mv base.img.gz "Armbian_bookworm_arm64_yf023d_$(date +%Y.%m.%d).img.gz"
-          ls -lh *.img.gz
+          OUTNAME="Armbian_bookworm_arm64_yf023d_$(date +%Y.%m.%d).img.gz"
+          mv base.img.gz "${OUTNAME}"
+          ls -lh "${OUTNAME}"
 
       - name: Upload
         uses: softprops/action-gh-release@v1
@@ -135,11 +161,11 @@ jobs:
           tag_name: armbian-yf023d-bookworm
           name: "Armbian bookworm for YF-023D"
           body: |
-            Armbian image for Young-Feel YF-023D v6 RK3568 Board
+            Armbian for Young-Feel YF-023D v6 RK3568 Board
             
-            Custom kernel with MAE0621 Ethernet PHY driver + custom DTS.
-            
+            Custom kernel: MAE0621 PHY + custom DTS
             Default login: root / 1234
+            Install: armbian-install
           files: /tmp/work/Armbian_bookworm_arm64_yf023d_*.img.gz
           make_latest: true
         env:
