@@ -55,7 +55,6 @@ jobs:
           ln -sf /builder/build ${{ github.workspace }}/build
           ln -sf /builder/build /home/runner/work/_actions/ophub/amlogic-s9xxx-armbian/main/build
 
-          # Query latest trunk image from ophub releases
           latest_version=$(curl -s \
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
@@ -78,7 +77,6 @@ jobs:
           curl -fsSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
                "${armbian_url}" -o "${armbian_buildpath}/${armbian_filename}"
 
-          echo "Downloaded: $(ls -lh ${armbian_buildpath}/${armbian_filename})"
           echo "status=success" >> ${GITHUB_OUTPUT}
 
       - name: Build Armbian with rock-3b board
@@ -95,54 +93,7 @@ jobs:
           armbian_fstype: ext4
           builder_name: yf023d
 
-      - name: Replace DTB and update boot config
-        if: ${{ env.PACKAGED_STATUS == 'success' && !cancelled() }}
-        run: |
-          IMG_FILE=$(find ${{ env.PACKAGED_OUTPUTPATH }} -name "*.img.gz" | head -1)
-          if [ -z "$IMG_FILE" ]; then
-            echo "ERROR: No image found"
-            exit 1
-          fi
-          echo "Image: ${IMG_FILE}"
-
-          # Decompress
-          cp "${IMG_FILE}" /tmp/work.img.gz
-          gzip -d /tmp/work.img.gz
-
-          # Mount
-          LOOP=$(sudo losetup -fP --show /tmp/work.img)
-          sudo partprobe "${LOOP}"
-          sudo mkdir -p /mnt/rootfs
-          sudo mount "${LOOP}p2" /mnt/rootfs
-          sudo mkdir -p /mnt/boot
-          sudo mount "${LOOP}p1" /mnt/boot
-
-          # Copy custom DTB
-          DTS_SRC=$(find ${{ github.workspace }} -name "rk3568-yf-023d-v6.dts" 2>/dev/null | head -1)
-          if [ -n "$DTS_SRC" ]; then
-            sudo apt-get install -y device-tree-compiler >/dev/null 2>&1
-            dtc -I dts -O dtb -o /tmp/rk3568-yf-023d-v6.dtb "${DTS_SRC}"
-            sudo cp /tmp/rk3568-yf-023d-v6.dtb /mnt/boot/dtb/rockchip/
-            echo "Custom DTB installed"
-          fi
-
-          # Update boot config
-          for conf in /mnt/boot/armbianEnv.txt /mnt/boot/extlinux/extlinux.conf; do
-            if [ -f "$conf" ]; then
-              sudo sed -i 's|rk3568-rock-3b.dtb|rk3568-yf-023d-v6.dtb|g' "$conf"
-              echo "Updated: $conf"
-            fi
-          done
-
-          sudo umount /mnt/boot 2>/dev/null
-          sudo umount /mnt/rootfs 2>/dev/null
-          sudo losetup -d "${LOOP}"
-
-          gzip -9 /tmp/work.img
-          cp /tmp/work.img.gz "${IMG_FILE}"
-          echo "Done"
-
-      - name: Upload
+      - name: Upload Rock-3B based Armbian
         uses: softprops/action-gh-release@v1
         if: ${{ env.PACKAGED_STATUS == 'success' && !cancelled() }}
         with:
@@ -151,9 +102,17 @@ jobs:
           body: |
             Armbian for Young-Feel YF-023D v6 RK3568
             
-            Based on Rock-3B (correct RK3568 u-boot)
-            Custom DTB: rk3568-yf-023d-v6.dtb
+            Based on Rock-3B image (correct RK3568 u-boot)
             Kernel: 6.12.y stable
+            
+            **After booting, replace DTB:**
+            ```bash
+            # Download and install custom DTB
+            wget https://github.com/gdd-xxx/amlogic-s9xxx-armbian/raw/main/dts/rk3568-yf-023d-v6.dtb
+            sudo cp rk3568-yf-023d-v6.dtb /boot/dtb/rockchip/
+            sudo sed -i 's/rk3568-rock-3b.dtb/rk3568-yf-023d-v6.dtb/g' /boot/armbianEnv.txt
+            sudo reboot
+            ```
             
             Default: root / 1234
           files: ${{ env.PACKAGED_OUTPUTPATH }}/*
