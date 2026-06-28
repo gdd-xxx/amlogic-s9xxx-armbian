@@ -537,17 +537,7 @@
 	};
 };
 
-&nandc {
-	status = "okay";
 
-	nand@0 {
-		reg = <0>;
-		nand-ecc-mode = "hw";
-		nand-ecc-strength = <16>;
-		nand-ecc-step-size = <1024>;
-		nand-bus-width = <8>;
-	};
-};
 
 &pcie2x1 {
 	pinctrl-names = "default";
