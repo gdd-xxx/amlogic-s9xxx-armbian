@@ -1,4 +1,4 @@
-name: Build Armbian for YF-023D
+name: Build Armbian for YF-023D (rock-3b base)
 
 on:
   workflow_dispatch:
@@ -7,126 +7,165 @@ env:
   TZ: Etc/UTC
 
 jobs:
+  setup:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          MATRIX='{"include":[{"release":"bookworm"},{"release":"trixie"}]}'
+          echo "matrix=${MATRIX}" >> "${GITHUB_OUTPUT}"
+
   build:
+    needs: setup
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    name: build-${{ matrix.release }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download Armbian base image
+      - name: Initialize build environment
+        id: init
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          mkdir -p /tmp/work
-          ARMBIAN_TAG="Armbian_bookworm_arm64_server_2026.06"
-          ARMBIAN_FILE="Armbian_26.05.0-trunk_bookworm_arm64_6.18.33.img.gz"
-          echo "Downloading ${ARMBIAN_FILE}..."
-          curl -fsSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/octet-stream" \
-            "https://github.com/ophub/amlogic-s9xxx-armbian/releases/download/${ARMBIAN_TAG}/${ARMBIAN_FILE}" \
-            -o /tmp/work/base.img.gz
-          ls -lh /tmp/work/base.img.gz
-          gzip -d /tmp/work/base.img.gz
-          echo "Base image ready"
+          docker rmi -f $(docker images -q) 2>/dev/null || true
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android 2>/dev/null
+          sudo swapoff -a
+          sudo -E apt-get -y update
+          sudo -E apt-get -y purge azure-cli ghc* zulu* llvm* firefox google* dotnet* powershell openjdk* mongodb* moby* || true
+          sudo -E apt-get -y install $(curl -fsSL https://ophub.org/ubuntu2404-build-armbian-depends)
+          sudo -E systemctl daemon-reload
+          sudo -E apt-get -y autoremove --purge
+          sudo -E apt-get clean
+          echo "status=success" >> ${GITHUB_OUTPUT}
 
-      - name: Download custom kernel
+      - name: Create virtual disk
+        id: disk
         run: |
-          mkdir -p /tmp/kernel-pkg
-          curl -fsSL -L -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            "https://github.com/gdd-xxx/amlogic-s9xxx-armbian/releases/download/kernel-yf023d/kernel-rk3568-yf023d.tar.gz" \
-            -o /tmp/kernel-pkg/custom.tar.gz
-          ls -lh /tmp/kernel-pkg/custom.tar.gz
-          mkdir -p /tmp/kernel-extract
-          tar xzf /tmp/kernel-pkg/custom.tar.gz -C /tmp/kernel-extract/
-          echo "Kernel extracted"
-          sudo find /tmp/kernel-extract -type f | head -30
+          root_avail=$(df --block-size=1G / | tail -1 | awk '{print $4}')
+          root_size=$(( root_avail - 4 ))
+          [[ "${root_size}" -gt 0 ]] || { echo "Error: Insufficient space"; exit 1; }
+          sudo truncate -s "${root_size}"G /root.img
+          build_dev=$(sudo losetup --find --show /root.img)
+          sudo mkfs.xfs -f -i sparse=0 -b size=4096 "${build_dev}"
+          sudo mkdir -p /builder
+          sudo mount "${build_dev}" /builder
+          sudo chown -R runner:runner /builder
+          echo "status=success" >> ${GITHUB_OUTPUT}
 
-      - name: Build custom image
+      - name: Build Armbian with rock-3b board (includes proper u-boot)
+        uses: ophub/amlogic-s9xxx-armbian@main
+        if: ${{ steps.disk.outputs.status == 'success' && !cancelled() }}
+        with:
+          build_target: armbian
+          armbian_path: build/output/images/*.img.gz
+          armbian_board: rock-3b
+          armbian_kernel: 6.12.y
+          auto_kernel: true
+          kernel_repo: ophub/kernel
+          kernel_usage: stable
+          armbian_fstype: ext4
+          builder_name: yf023d
+
+      - name: Replace DTB and update boot config
+        if: ${{ env.PACKAGED_STATUS == 'success' && !cancelled() }}
         run: |
-          IMG="/tmp/work/base.img"
-          LOOP=$(sudo losetup -fP --show "${IMG}")
-          echo "Loop: ${LOOP}"
+          echo "=== Current output ==="
+          ls -lh ${{ env.PACKAGED_OUTPUTPATH }}/ 2>/dev/null
+
+          # Find the Armbian image
+          IMG_FILE=$(find ${{ env.PACKAGED_OUTPUTPATH }} -name "*.img.gz" | head -1)
+          if [ -z "$IMG_FILE" ]; then
+            echo "ERROR: No image found"
+            exit 1
+          fi
+          echo "Image: ${IMG_FILE}"
+
+          # Decompress
+          cp "${IMG_FILE}" /tmp/work.img.gz
+          gzip -d /tmp/work.img.gz
+
+          # Mount and modify
+          LOOP=$(sudo losetup -fP --show /tmp/work.img)
           sudo partprobe "${LOOP}"
 
-          # Single partition layout - mount to /mnt/rootfs
+          # Mount rootfs
           sudo mkdir -p /mnt/rootfs
-          sudo mount "${LOOP}p1" /mnt/rootfs
+          sudo mount "${LOOP}p2" /mnt/rootfs
 
-          # Boot is inside rootfs at /boot
-          BOOT_DIR="/mnt/rootfs/boot"
+          # Mount boot
+          sudo mkdir -p /mnt/boot
+          sudo mount "${LOOP}p1" /mnt/boot
+
           echo "=== Boot ==="
-          sudo ls -la "${BOOT_DIR}/" | head -20
+          sudo ls -la /mnt/boot/
 
-          # Find existing kernel version
-          KVER=$(sudo ls /mnt/rootfs/lib/modules/ 2>/dev/null | head -1)
-          echo "Existing kernel: ${KVER}"
-
-          # Find new kernel version
-          NEW_KVER=$(sudo ls /tmp/kernel-extract/lib/modules/ 2>/dev/null | head -1)
-          echo "New kernel: ${NEW_KVER}"
-
-          # Backup and replace Image
-          if [ -f "${BOOT_DIR}/Image" ]; then
-              sudo mv "${BOOT_DIR}/Image" "${BOOT_DIR}/Image.old"
+          # Find our custom DTB
+          DTB_SRC=$(find ${{ github.workspace }} -name "rk3568-yf-023d-v6.dtb" 2>/dev/null | head -1)
+          if [ -z "$DTB_SRC" ]; then
+            # Compile from DTS
+            DTS_SRC=$(find ${{ github.workspace }} -name "rk3568-yf-023d-v6.dts" 2>/dev/null | head -1)
+            if [ -n "$DTS_SRC" ]; then
+              echo "Compiling DTS..."
+              sudo apt-get install -y device-tree-compiler
+              dtc -I dts -O dtb -o /tmp/rk3568-yf-023d-v6.dtb "${DTS_SRC}"
+              DTB_SRC="/tmp/rk3568-yf-023d-v6.dtb"
+            fi
           fi
-          NEW_IMAGE=$(sudo find /tmp/kernel-extract -name "Image" -type f | head -1)
-          if [ -n "$NEW_IMAGE" ]; then
-              sudo cp "$NEW_IMAGE" "${BOOT_DIR}/Image"
-              echo "Replaced Image"
+
+          if [ -n "$DTB_SRC" ]; then
+            echo "Replacing DTB: ${DTB_SRC}"
+            sudo cp "${DTB_SRC}" /mnt/boot/dtb/rockchip/rk3568-yf-023d-v6.dtb
           else
-              echo "ERROR: No Image found!"
-              exit 1
+            echo "WARNING: No custom DTB found, keeping rock-3b DTB"
           fi
 
-          # Copy DTBs
-          sudo mkdir -p "${BOOT_DIR}/dtb/rockchip"
-          sudo find /tmp/kernel-extract -name "*.dtb" -exec cp {} "${BOOT_DIR}/dtb/rockchip/" \; 2>/dev/null || true
-          sudo find /tmp/kernel-extract -name "*.dtb" -exec cp {} "${BOOT_DIR}/dtb/" \; 2>/dev/null || true
-          echo "DTBs: $(sudo find ${BOOT_DIR} -name '*.dtb' | wc -l)"
-
-          # Replace modules
-          if [ -n "$KVER" ] && [ -d "/mnt/rootfs/lib/modules/${KVER}" ]; then
-              sudo rm -rf "/mnt/rootfs/lib/modules/${KVER}"
-          fi
-          if [ -n "$NEW_KVER" ] && [ -d "/tmp/kernel-extract/lib/modules/${NEW_KVER}" ]; then
-              sudo mkdir -p /mnt/rootfs/lib/modules
-              sudo cp -a "/tmp/kernel-extract/lib/modules/${NEW_KVER}" /mnt/rootfs/lib/modules/
-              echo "Modules replaced: ${NEW_KVER}"
-          fi
-
-          # Update boot config
-          for conf in "${BOOT_DIR}/extlinux/extlinux.conf" "${BOOT_DIR}/armbianEnv.txt"; do
-              if [ -f "$conf" ]; then
-                  sudo sed -i "s|${KVER}|${NEW_KVER}|g" "$conf" 2>/dev/null || true
-                  echo "Updated: $conf"
-              fi
+          # Update boot config to point to our DTB
+          for conf in /mnt/boot/armbianEnv.txt /mnt/boot/extlinux/extlinux.conf; do
+            if [ -f "$conf" ]; then
+              echo "Updating $conf"
+              sudo sed -i 's|fdtfile=rockchip/rk3568-rock-3b.dtb|fdtfile=rockchip/rk3568-yf-023d-v6.dtb|g' "$conf" 2>/dev/null || true
+              sudo sed -i 's|FDT /dtb/rockchip/rk3568-rock-3b.dtb|FDT /dtb/rockchip/rk3568-yf-023d-v6.dtb|g' "$conf" 2>/dev/null || true
+              cat "$conf"
+            fi
           done
 
           # Cleanup
-          sudo umount /mnt/rootfs
+          sudo umount /mnt/boot 2>/dev/null
+          sudo umount /mnt/rootfs 2>/dev/null
           sudo losetup -d "${LOOP}"
-          echo "Build complete"
 
-      - name: Compress and upload
-        run: |
-          cd /tmp/work
-          gzip -9 base.img
-          OUTNAME="Armbian_bookworm_arm64_yf023d_$(date +%Y.%m.%d).img.gz"
-          mv base.img.gz "${OUTNAME}"
-          ls -lh "${OUTNAME}"
+          # Recompress
+          gzip -9 /tmp/work.img
+          mv /tmp/work.img.gz "${IMG_FILE}"
+          echo "DTB replaced and boot config updated"
 
       - name: Upload
         uses: softprops/action-gh-release@v1
+        if: ${{ env.PACKAGED_STATUS == 'success' && !cancelled() }}
         with:
-          tag_name: armbian-yf023d-bookworm
-          name: "Armbian bookworm for YF-023D"
+          tag_name: armbian-yf023d-${{ matrix.release }}
+          name: "Armbian ${{ matrix.release }} for YF-023D (RK3568)"
           body: |
             Armbian for Young-Feel YF-023D v6 RK3568 Board
             
-            Custom kernel: MAE0621 PHY + custom DTS
+            Based on Rock-3B image (proper u-boot for RK3568)
+            Custom DTB: rk3568-yf-023d-v6.dtb
+            Kernel: 6.12.y (stable)
+            
             Default login: root / 1234
-          files: /tmp/work/Armbian_bookworm_arm64_yf023d_*.img.gz
+            Install: armbian-install
+          files: ${{ env.PACKAGED_OUTPUTPATH }}/*
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
