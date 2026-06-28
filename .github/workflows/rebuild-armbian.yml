@@ -1,34 +1,7 @@
-name: Build full Armbian for YF-023D
+name: Build Armbian with custom YF-023D kernel
 
 on:
   workflow_dispatch:
-    inputs:
-      set_release:
-        description: "OS Release"
-        required: false
-        default: "bookworm"
-        type: choice
-        options:
-          - trixie
-          - bookworm
-          - resolute
-          - noble
-      armbian_edition:
-        description: "Image edition"
-        required: false
-        default: "server"
-        type: choice
-        options:
-          - server
-          - desktop
-      armbian_fstype:
-        description: "Root filesystem type"
-        required: false
-        default: "ext4"
-        type: choice
-        options:
-          - ext4
-          - btrfs
 
 env:
   TZ: Etc/UTC
@@ -51,7 +24,6 @@ jobs:
           docker rmi -f $(docker images -q) 2>/dev/null || true
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android 2>/dev/null
           sudo swapoff -a
-          sudo rm -f /swapfile /mnt/swapfile
           sudo -E apt-get -y update
           sudo -E apt-get -y purge azure-cli ghc* zulu* llvm* firefox google* dotnet* powershell openjdk* mongodb* moby* || true
           sudo -E apt-get -y install $(curl -fsSL https://ophub.org/ubuntu2404-build-armbian-depends)
@@ -74,23 +46,22 @@ jobs:
           sudo chown -R runner:runner /builder
           echo "status=success" >> ${GITHUB_OUTPUT}
 
-      - name: Get Armbian base image from ophub releases
+      - name: Download Armbian base image
         id: down
         working-directory: /builder
-        if: ${{ steps.init.outputs.status == 'success' && !cancelled() }}
         run: |
           armbian_buildpath="build/output/images"
           mkdir -p "${armbian_buildpath}"
           ln -sf /builder/build ${{ github.workspace }}/build
           ln -sf /builder/build /home/runner/work/_actions/ophub/amlogic-s9xxx-armbian/main/build
 
-          # Query latest trunk Armbian image from ophub releases
+          # Query latest bookworm Armbian trunk image from ophub releases
           latest_version=$(curl -s \
               -H "Accept: application/vnd.github+json" \
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
               "https://api.github.com/repos/ophub/amlogic-s9xxx-armbian/releases?per_page=5" | \
-              jq -r --arg RELEASE "${{ inputs.set_release }}" \
-              '[.[] | select(.tag_name | contains($RELEASE) and contains("server"))] |
+              jq -r '
+              [.[] | select(.tag_name | contains("bookworm") and contains("server"))] |
               map(.assets[] | select(.name | contains("-trunk_") and endswith(".img.gz"))) |
               sort_by(.updated_at) | reverse | .[0] |
               {url: .browser_download_url, name: .name}')
@@ -107,40 +78,91 @@ jobs:
           curl -fsSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
                "${armbian_url}" -o "${armbian_buildpath}/${armbian_filename}"
 
-          echo "build_tag=Armbian_${{ inputs.set_release }}_arm64_${{ inputs.armbian_edition }}_$(date +"%Y.%m")" >> ${GITHUB_ENV}
           echo "status=success" >> ${GITHUB_OUTPUT}
 
-      - name: Build custom Armbian image
+      - name: Download custom kernel and prepare for ophub format
+        id: kernel
+        working-directory: /builder
+        run: |
+          # Download our custom kernel
+          curl -fsSL -L \
+               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+               "https://github.com/gdd-xxx/amlogic-s9xxx-armbian/releases/download/kernel-yf023d/kernel-rk3568-yf023d.tar.gz" \
+               -o /tmp/custom-kernel.tar.gz
+
+          if [[ ! -s /tmp/custom-kernel.tar.gz ]]; then
+              echo "Error: Failed to download custom kernel"
+              exit 1
+          fi
+
+          echo "Custom kernel downloaded: $(ls -lh /tmp/custom-kernel.tar.gz | awk '{print $5}')"
+
+          # Check contents
+          echo "Kernel package contents:"
+          tar tzf /tmp/custom-kernel.tar.gz | head -30
+
+          # Re-package in ophub kernel format
+          # ophub expects: {version}.tar.gz with boot/, dtb/, lib/modules/ structure
+          mkdir -p /tmp/ophub-kernel/boot /tmp/ophub-kernel/dtb /tmp/ophub-kernel/lib
+
+          # Extract our kernel
+          mkdir -p /tmp/custom-extract
+          tar xzf /tmp/custom-kernel.tar.gz -C /tmp/custom-extract
+
+          # Find and copy Image
+          find /tmp/custom-extract -name "Image" -o -name "*.Image" | head -1 | xargs -I{} cp {} /tmp/ophub-kernel/boot/
+
+          # Copy DTBs
+          find /tmp/custom-extract -name "*.dtb" -exec cp {} /tmp/ophub-kernel/dtb/ \; 2>/dev/null || true
+          mkdir -p /tmp/ophub-kernel/dtb/rockchip
+          find /tmp/custom-extract -path "*/dtb/rockchip/*.dtb" -exec cp {} /tmp/ophub-kernel/dtb/rockchip/ \; 2>/dev/null || true
+          find /tmp/custom-extract -name "*.dtb" -exec cp {} /tmp/ophub-kernel/dtb/ \; 2>/dev/null || true
+
+          # Copy modules
+          cp -r /tmp/custom-extract/lib /tmp/ophub-kernel/ 2>/dev/null || true
+
+          # Create ophub-compatible package
+          # ophub uses version number as filename, e.g., 6.12.94.tar.gz
+          # Our kernel version from the build
+          KERNEL_VER=$(uname -r 2>/dev/null || echo "6.12.0")
+          cd /tmp/ophub-kernel
+          tar czf "/tmp/${KERNEL_VER}.tar.gz" *
+          echo "Created ophub-compatible package: ${KERNEL_VER}.tar.gz"
+          ls -lh "/tmp/${KERNEL_VER}.tar.gz"
+
+          # Upload to kernel_yf023d release so ophub action can find it
+          # Actually, let's just place it where ophub expects it
+          echo "kernel_version=${KERNEL_VER}" >> ${GITHUB_OUTPUT}
+          echo "status=success" >> ${GITHUB_OUTPUT}
+
+      - name: Rebuild Armbian with custom kernel
         uses: ophub/amlogic-s9xxx-armbian@main
-        if: ${{ steps.down.outputs.status == 'success' && !cancelled() }}
+        if: ${{ steps.down.outputs.status == 'success' && steps.kernel.outputs.status == 'success' && !cancelled() }}
         with:
           build_target: armbian
           armbian_path: build/output/images/*.img.gz
           armbian_board: rk3568
-          armbian_kernel: 6.12.y
-          auto_kernel: true
-          kernel_repo: gdd-xxx/amlogic-s9xxx-armbian
-          kernel_usage: stable
-          armbian_fstype: ${{ inputs.armbian_fstype }}
+          armbian_kernel: ${{ steps.kernel.outputs.kernel_version }}
+          auto_kernel: false
+          kernel_repo: gdd-xxx/kernel
+          kernel_usage: yf023d
+          armbian_fstype: ext4
           builder_name: yf023d
 
       - name: Upload Armbian image
         uses: softprops/action-gh-release@v1
         if: ${{ env.PACKAGED_STATUS == 'success' && !cancelled() }}
         with:
-          tag_name: ${{ env.build_tag }}
-          name: "Armbian ${{ inputs.set_release }} for YF-023D RK3568"
+          tag_name: armbian-yf023d-bookworm
+          name: "Armbian bookworm for YF-023D RK3568"
           body: |
             Armbian image for Young-Feel YF-023D v6 RK3568 Board
             
-            Features:
-            - Custom kernel with MAE0621 Ethernet PHY driver
-            - HDMI output
-            - WiFi/BT support
-            - eMMC/SD support
+            Custom kernel with:
+            - MAE0621 Ethernet PHY driver
+            - Custom DTS for YF-023D
             
             Default login: root / 1234
-            Install to eMMC: armbian-install
           files: ${{ env.PACKAGED_OUTPUTPATH }}/*
           make_latest: true
         env:
