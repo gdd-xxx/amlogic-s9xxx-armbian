@@ -31,7 +31,6 @@ jobs:
           mkdir -p /tmp/kernel
           tar xzf kernel.tar.gz -C /tmp/kernel --strip-components=1
 
-          # Download ophub kernel config
           cd /tmp/kernel
           curl -fsSL -o .config \
             "https://raw.githubusercontent.com/ophub/kernel/main/kernel-config/release/stable/config-6.12"
@@ -74,25 +73,17 @@ jobs:
           FULL_VER="${KERNEL_VER}.${KERNEL_PATCH}.${KERNEL_SUB}"
           echo "Kernel version: ${FULL_VER}"
 
-          # Create ophub-format directory structure
           mkdir -p /tmp/ophub-pkg/${FULL_VER}/{boot,dtb/rockchip,lib/modules/${FULL_VER},header}
 
-          # Copy kernel image
           cp arch/arm64/boot/Image /tmp/ophub-pkg/${FULL_VER}/boot/
-
-          # Copy DTBs
           find arch/arm64/boot/dts/rockchip -name "*.dtb" -exec cp {} /tmp/ophub-pkg/${FULL_VER}/dtb/rockchip/ \;
-
-          # Copy modules
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
             INSTALL_MOD_PATH=/tmp/ophub-pkg/${FULL_VER}/lib modules_install
 
-          # Create tarball
           cd /tmp/ophub-pkg
           tar czf "${FULL_VER}.tar.gz" ${FULL_VER}
           ls -lh "${FULL_VER}.tar.gz"
 
-          # Upload to kernel_stable release
           echo "KERNEL_VER=${FULL_VER}" >> ${GITHUB_ENV}
 
       - name: Upload kernel to release
@@ -179,6 +170,18 @@ jobs:
 
           echo "status=success" >> ${GITHUB_OUTPUT}
 
+      - name: Get kernel version from release
+        id: kver
+        run: |
+          # Get the exact kernel version from our kernel_stable release
+          KERNEL_VER=$(curl -s \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/tags/kernel_stable" | \
+              jq -r '.assets[0].name' | sed 's/.tar.gz$//')
+          echo "Kernel version: ${KERNEL_VER}"
+          echo "kernel_ver=${KERNEL_VER}" >> ${GITHUB_OUTPUT}
+
       - name: Build Armbian with custom kernel
         uses: ophub/amlogic-s9xxx-armbian@main
         if: ${{ steps.down.outputs.status == 'success' && !cancelled() }}
@@ -186,8 +189,8 @@ jobs:
           build_target: armbian
           armbian_path: build/output/images/*.img.gz
           armbian_board: rock-3b
-          armbian_kernel: 6.12.y
-          auto_kernel: false
+          armbian_kernel: ${{ steps.kver.outputs.kernel_ver }}
+          auto_kernel: true
           kernel_repo: ${{ github.repository }}
           kernel_usage: stable
           armbian_fstype: ext4
@@ -203,7 +206,7 @@ jobs:
             Armbian for Young-Feel YF-023D v6 RK3568
             
             Based on Rock-3B (correct RK3568 u-boot)
-            Kernel: 6.12.y with MAE0621 Ethernet PHY driver
+            Kernel: ${{ steps.kver.outputs.kernel_ver }} with MAE0621 Ethernet PHY driver
             
             Default: root / 1234
             Install: armbian-install
