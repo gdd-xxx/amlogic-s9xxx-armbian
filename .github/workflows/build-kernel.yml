@@ -4,14 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       kernel_version:
-        description: "Kernel version to build"
+        description: "Kernel version"
         required: false
         default: "6.12.y"
         type: choice
         options:
           - 6.12.y
           - 6.18.y
-          - 6.6.y
 
 env:
   TZ: Etc/UTC
@@ -26,13 +25,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Initialize build environment
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y \
-            build-essential flex bison libssl-dev libelf-dev \
-            gcc-aarch64-linux-gnu bc python3 \
-            device-tree-compiler lz4 libncurses-dev
+          sudo apt-get install -y $(curl -fsSL https://ophub.org/ubuntu2404-build-armbian-depends)
 
       - name: Download kernel source
         run: |
@@ -41,220 +37,78 @@ jobs:
             "https://github.com/ophub/linux-${{ inputs.kernel_version }}/archive/refs/heads/main.tar.gz"
           mkdir -p /tmp/kernel
           tar xzf kernel.tar.gz -C /tmp/kernel --strip-components=1
-          echo "Kernel source downloaded"
+
+      - name: Download ophub kernel config
+        run: |
+          cd /tmp/kernel
+          curl -fsSL -o .config \
+            "https://raw.githubusercontent.com/ophub/kernel/main/kernel-config/release/stable/config-6.12"
+          sed -i 's|CONFIG_LOCALVERSION=.*|CONFIG_LOCALVERSION=""|' .config
+          echo "Config downloaded"
 
       - name: Add MAE0621 PHY driver
         run: |
           cd /tmp/kernel
           cp "${{ github.workspace }}/drivers/net/phy/maxio.c" drivers/net/phy/
-          
-          # Add to Kconfig
+
           if ! grep -q "config MAXIO_PHY" drivers/net/phy/Kconfig; then
-            cat >> drivers/net/phy/Kconfig << 'EOF'
+            cat >> drivers/net/phy/Kconfig << 'KEOF'
           config MAXIO_PHY
               tristate "Maxio MAE0621 PHYs"
               depends on PHYLIB
               help
-                Currently supports the Maxio MAE0621A Q2C and Q3C PHYs.
-                These are Gigabit Ethernet PHYs manufactured by Maxio Technology.
-          EOF
+                Supports the Maxio MAE0621A Q2C and Q3C Gigabit Ethernet PHYs.
+          KEOF
           fi
-          
-          # Add to Makefile
+
           if ! grep -q "maxio" drivers/net/phy/Makefile; then
             echo "obj-\$(CONFIG_MAXIO_PHY) += maxio.o" >> drivers/net/phy/Makefile
           fi
-          
-          echo "MAE0621 driver added"
+
+          scripts/config --enable CONFIG_MAXIO_PHY
+          echo "MAE0621 driver added and enabled"
 
       - name: Add custom DTS
         run: |
           cd /tmp/kernel
           cp "${{ github.workspace }}/dts/rk3568-yf-023d-v6.dts" \
             arch/arm64/boot/dts/rockchip/
-          
-          # Add to Makefile
+
           if ! grep -q "rk3568-yf-023d-v6" arch/arm64/boot/dts/rockchip/Makefile; then
             echo "dtb-\$(CONFIG_ARCH_ROCKCHIP) += rk3568-yf-023d-v6.dtb" \
               >> arch/arm64/boot/dts/rockchip/Makefile
           fi
-          
           echo "Custom DTS added"
 
-      - name: Configure kernel (minimal for RK3568)
+      - name: Build kernel
         run: |
           cd /tmp/kernel
-          # Use defconfig as base
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
-          
-          # Enable only essential RK3568 features
-          scripts/config --enable CONFIG_ARCH_ROCKCHIP
-          scripts/config --enable CONFIG_SMP
-          scripts/config --enable CONFIG_CPUFREQ_DT
-          
-          # Enable MAE0621 driver
-          scripts/config --enable CONFIG_MAXIO_PHY
-          scripts/config --module CONFIG_MAXIO_PHY
-          
-          # Enable networking essentials
-          scripts/config --enable CONFIG_NET
-          scripts/config --enable CONFIG_INET
-          scripts/config --enable CONFIG_NETDEVICES
-          scripts/config --enable CONFIG_ETHERNET
-          scripts/config --enable CONFIG_NET_VENDOR_ROCKCHIP
-          scripts/config --enable CONFIG_STMMAC_ETH
-          scripts/config --enable CONFIG_DWMAC_ROCKCHIP
-          scripts/config --enable CONFIG_PHY_ROCKCHIP_INNO_USB2
-          scripts/config --enable CONFIG_PHY_ROCKCHIP_NANENG_COMBPHY
-          
-          # Enable filesystem essentials
-          scripts/config --enable CONFIG_EXT4_FS
-          scripts/config --enable CONFIG_BTRFS_FS
-          scripts/config --enable CONFIG_F2FS_FS
-          scripts/config --enable CONFIG_VFAT_FS
-          scripts/config --enable CONFIG_FAT_FS
-          scripts/config --enable CONFIG_NTFS3_FS
-          scripts/config --enable CONFIG_SQUASHFS
-          
-          # Enable USB
-          scripts/config --enable CONFIG_USB
-          scripts/config --enable CONFIG_USB_SUPPORT
-          scripts/config --enable CONFIG_USB_DWC3
-          scripts/config --enable CONFIG_USB_DWC3_OF_SIMPLE
-          scripts/config --enable CONFIG_USB_XHCI_HCD
-          scripts/config --enable CONFIG_USB_EHCI_HCD
-          scripts/config --enable CONFIG_USB_OHCI_HCD
-          scripts/config --enable CONFIG_USB_STORAGE
-          scripts/config --enable CONFIG_USB_UAS
-          
-          # Enable MMC/SD
-          scripts/config --enable CONFIG_MMC
-          scripts/config --enable CONFIG_MMC_SDHCI
-          scripts/config --enable CONFIG_MMC_SDHCI_PLTFM
-          scripts/config --enable CONFIG_MMC_SDHCI_OF_DWCMSHC
-          scripts/config --enable CONFIG_MMC_DW
-          scripts/config --enable CONFIG_MMC_DW_ROCKCHIP
-          
-          # Enable GPU (Panfrost for Mali)
-          scripts/config --enable CONFIG_DRM
-          scripts/config --enable CONFIG_DRM_PANFROST
-          scripts/config --enable CONFIG_DRM_ROCKCHIP
-          scripts/config --enable CONFIG_FB
-          scripts/config --enable CONFIG_FRAMEBUFFER_CONSOLE
-          
-          # Enable HDMI
-          scripts/config --enable CONFIG_DRM_DW_HDMI
-          scripts/config --enable CONFIG_DRM_DW_HDMI_I2S_AUDIO
-          
-          # Enable NPU/RKVDEC/RKVENC (vendor drivers, may not compile with mainline)
-          scripts/config --disable CONFIG_ROCKCHIP_RKNPU
-          scripts/config --disable CONFIG_ROCKCHIP_VDEC2
-          scripts/config --disable CONFIG_ROCKCHIP_VCODEC
-          
-          # Disable problematic drivers that cause build errors
-          scripts/config --disable CONFIG_SND_SOC_RCAR
-          scripts/config --disable CONFIG_CLK_IMX8MP_AUDIOMIX
-          scripts/config --disable CONFIG_SND_SOC_IMX
-          scripts/config --disable CONFIG_SND_SOC_FSL_ASOC
-          scripts/config --disable CONFIG_SND_SOC_FSL_MICFIL
-          scripts/config --disable CONFIG_SND_SOC_SOF
-          scripts/config --disable CONFIG_SND_SOC_ADI
-          scripts/config --disable CONFIG_SND_SOC_IMG
-          scripts/config --disable CONFIG_SND_SOC_MTK
-          scripts/config --disable CONFIG_SND_SOC_STI
-          scripts/config --disable CONFIG_SND_SOC_XILINX
-          
-          # Enable I2C for PMIC
-          scripts/config --enable CONFIG_I2C
-          scripts/config --enable CONFIG_I2C_CHARDEV
-          scripts/config --enable CONFIG_I2C_RK3X
-          
-          # Enable SPI
-          scripts/config --enable CONFIG_SPI
-          scripts/config --enable CONFIG_SPI_ROCKCHIP_SFC
-          
-          # Enable GPIO
-          scripts/config --enable CONFIG_GPIO_CDEV
-          scripts/config --enable CONFIG_GPIO_SYSCON
-          
-          # Enable PWM
-          scripts/config --enable CONFIG_PWM
-          scripts/config --enable CONFIG_PWM_ROCKCHIP
-          
-          # Enable thermal
-          scripts/config --enable CONFIG_THERMAL
-          scripts/config --enable CONFIG_ROCKCHIP_THERMAL
-          
-          # Enable RTC
-          scripts/config --enable CONFIG_RTC_CLASS
-          scripts/config --enable CONFIG_RTC_DRV_PCF8563
-          
-          # Enable crypto
-          scripts/config --enable CONFIG_CRYPTO
-          scripts/config --enable CONFIG_CRYPTO_USER
-          scripts/config --enable CONFIG_CRYPTO_TEST
-          
-          # Enable power management
-          scripts/config --enable CONFIG_PM
-          scripts/config --enable CONFIG_PM_SLEEP
-          scripts/config --enable CONFIG_SUSPEND
-          scripts/config --enable CONFIG_HIBERNATION
-          
-          # Enable LED
-          scripts/config --enable CONFIG_LEDS_CLASS
-          scripts/config --enable CONFIG_LEDS_GPIO
-          
-          # Enable watchdog
-          scripts/config --enable CONFIG_WATCHDOG
-          scripts/config --enable CONFIG_DW_WATCHDOG
-          
-          # Run olddefconfig to resolve dependencies
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
-          
-          echo "Kernel configured"
-
-      - name: Compile kernel
-        run: |
-          cd /tmp/kernel
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-            -j$(nproc) Image modules dtbs 2>&1 | tee /tmp/build.log
+            -j$(nproc) Image modules dtbs
           echo "Build completed"
 
-      - name: Package kernel
+      - name: Package
         run: |
           cd /tmp/kernel
           mkdir -p /tmp/output/dtb /tmp/output/modules
-          
-          # Copy DTBs
           find arch/arm64/boot/dts/rockchip -name "*.dtb" -exec cp {} /tmp/output/dtb/ \;
-          
-          # Copy kernel image
           cp arch/arm64/boot/Image /tmp/output/
-          
-          # Install modules
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
             INSTALL_MOD_PATH=/tmp/output/modules modules_install
-          
-          # Create tarball
           cd /tmp/output
           tar czf "${{ github.workspace }}/kernel-rk3568-yf023d.tar.gz" *
-          echo "Package created"
 
       - name: Upload kernel
         uses: softprops/action-gh-release@v1
         with:
           tag_name: kernel-yf023d
-          name: "RK3568 YF-023D Kernel ${{ inputs.kernel_version }}"
+          name: "RK3568 YF-023D Kernel"
           body: |
-            Custom kernel for Young-Feel YF-023D v6 RK3568 Board
-            
-            Features:
+            Custom kernel for YF-023D v6 RK3568 Board
             - MAE0621A Ethernet PHY driver
             - Custom DTS for YF-023D
-            - GPU (Panfrost) support
-            - HDMI output
-            
-            Default login: root / 1234
+            - Based on ophub stable config
           files: kernel-rk3568-yf023d.tar.gz
           make_latest: true
         env:
