@@ -1,4 +1,4 @@
-name: Build Armbian for YF-023D
+name: Build complete Armbian with MAE0621 driver
 
 on:
   workflow_dispatch:
@@ -7,11 +7,111 @@ env:
   TZ: Etc/UTC
 
 jobs:
-  build:
+  build-image:
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize build environment
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential flex bison libssl-dev libelf-dev \
+            gcc-aarch64-linux-gnu bc python3 \
+            device-tree-compiler lz4 libncurses-dev ccache
+
+      - name: Download kernel source and config
+        run: |
+          cd /tmp
+          curl -fsSL -o kernel.tar.gz \
+            "https://github.com/ophub/linux-6.12.y/archive/refs/heads/main.tar.gz"
+          mkdir -p /tmp/kernel
+          tar xzf kernel.tar.gz -C /tmp/kernel --strip-components=1
+
+          # Download ophub kernel config
+          cd /tmp/kernel
+          curl -fsSL -o .config \
+            "https://raw.githubusercontent.com/ophub/kernel/main/kernel-config/release/stable/config-6.12"
+          sed -i 's|CONFIG_LOCALVERSION=.*|CONFIG_LOCALVERSION=""|' .config
+
+      - name: Add MAE0621 PHY driver
+        run: |
+          cd /tmp/kernel
+          cp ${{ github.workspace }}/drivers/net/phy/maxio.c drivers/net/phy/
+
+          if ! grep -q "config MAXIO_PHY" drivers/net/phy/Kconfig; then
+            cat >> drivers/net/phy/Kconfig << 'KEOF'
+          config MAXIO_PHY
+              tristate "Maxio MAE0621 PHYs"
+              depends on PHYLIB
+              help
+                Supports the Maxio MAE0621A Q2C and Q3C Gigabit Ethernet PHYs.
+          KEOF
+          fi
+
+          if ! grep -q "maxio" drivers/net/phy/Makefile; then
+            echo "obj-\$(CONFIG_MAXIO_PHY) += maxio.o" >> drivers/net/phy/Makefile
+          fi
+
+          scripts/config --enable CONFIG_MAXIO_PHY
+
+      - name: Compile kernel
+        run: |
+          cd /tmp/kernel
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+            -j$(nproc) Image modules dtbs
+
+      - name: Package kernel in ophub format
+        run: |
+          cd /tmp/kernel
+          KERNEL_VER=$(grep "^VERSION" Makefile | head -1 | awk '{print $3}')
+          KERNEL_PATCH=$(grep "^PATCHLEVEL" Makefile | head -1 | awk '{print $3}')
+          KERNEL_SUB=$(grep "^SUBLEVEL" Makefile | head -1 | awk '{print $3}')
+          FULL_VER="${KERNEL_VER}.${KERNEL_PATCH}.${KERNEL_SUB}"
+          echo "Kernel version: ${FULL_VER}"
+
+          # Create ophub-format directory structure
+          mkdir -p /tmp/ophub-pkg/${FULL_VER}/{boot,dtb/rockchip,lib/modules/${FULL_VER},header}
+
+          # Copy kernel image
+          cp arch/arm64/boot/Image /tmp/ophub-pkg/${FULL_VER}/boot/
+
+          # Copy DTBs
+          find arch/arm64/boot/dts/rockchip -name "*.dtb" -exec cp {} /tmp/ophub-pkg/${FULL_VER}/dtb/rockchip/ \;
+
+          # Copy modules
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+            INSTALL_MOD_PATH=/tmp/ophub-pkg/${FULL_VER}/lib modules_install
+
+          # Create tarball
+          cd /tmp/ophub-pkg
+          tar czf "${FULL_VER}.tar.gz" ${FULL_VER}
+          ls -lh "${FULL_VER}.tar.gz"
+
+          # Upload to kernel_stable release
+          echo "KERNEL_VER=${FULL_VER}" >> ${GITHUB_ENV}
+
+      - name: Upload kernel to release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: kernel_stable
+          name: "Custom kernel with MAE0621"
+          body: "Kernel ${{ env.KERNEL_VER }} with MAE0621 Ethernet PHY driver"
+          files: /tmp/ophub-pkg/${{ env.KERNEL_VER }}.tar.gz
+          allow_updates: true
+          make_latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-armbian:
+    needs: build-image
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -79,7 +179,7 @@ jobs:
 
           echo "status=success" >> ${GITHUB_OUTPUT}
 
-      - name: Build Armbian with rock-3b board
+      - name: Build Armbian with custom kernel
         uses: ophub/amlogic-s9xxx-armbian@main
         if: ${{ steps.down.outputs.status == 'success' && !cancelled() }}
         with:
@@ -87,8 +187,8 @@ jobs:
           armbian_path: build/output/images/*.img.gz
           armbian_board: rock-3b
           armbian_kernel: 6.12.y
-          auto_kernel: true
-          kernel_repo: ophub/kernel
+          auto_kernel: false
+          kernel_repo: ${{ github.repository }}
           kernel_usage: stable
           armbian_fstype: ext4
           builder_name: yf023d
@@ -98,18 +198,15 @@ jobs:
         if: ${{ env.PACKAGED_STATUS == 'success' && !cancelled() }}
         with:
           tag_name: armbian-yf023d-bookworm
-          name: "Armbian bookworm for YF-023D (RK3568)"
+          name: "Armbian bookworm for YF-023D (RK3568 + MAE0621)"
           body: |
             Armbian for Young-Feel YF-023D v6 RK3568
             
-            Based on Rock-3B image (correct RK3568 u-boot + DTB)
-            Kernel: 6.12.y stable
-            
-            Rock-3B DTB is compatible with YF-023D for basic booting
-            (same RK3568 SoC, same memory, same UART).
+            Based on Rock-3B (correct RK3568 u-boot)
+            Kernel: 6.12.y with MAE0621 Ethernet PHY driver
             
             Default: root / 1234
-            Install to eMMC: armbian-install
+            Install: armbian-install
           files: ${{ env.PACKAGED_OUTPUTPATH }}/*
           make_latest: true
         env:
