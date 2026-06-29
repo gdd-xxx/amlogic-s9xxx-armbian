@@ -96,7 +96,6 @@ jobs:
         run: |
           mkdir -p /tmp/work
 
-          # Download Armbian trunk image
           echo "Downloading Armbian base image..."
           TAG="Armbian_bookworm_arm64_server_2026.06"
           FILE="Armbian_26.05.0-trunk_bookworm_arm64_6.18.33.img.gz"
@@ -104,33 +103,30 @@ jobs:
             -H "Accept: application/octet-stream" \
             "https://github.com/ophub/amlogic-s9xxx-armbian/releases/download/${TAG}/${FILE}" \
             -o /tmp/work/base.img.gz
-          echo "Base image: $(ls -lh /tmp/work/base.img.gz | awk '{print $5}')"
+          echo "Base: $(ls -lh /tmp/work/base.img.gz | awk '{print $5}')"
 
-          # Download our custom kernel
           echo "Downloading custom kernel..."
           KERNEL_URL=$(curl -s \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             "https://api.github.com/repos/${{ github.repository }}/releases/tags/kernel_stable" | \
             jq -r '.assets[0].browser_download_url')
-          echo "Kernel URL: ${KERNEL_URL}"
           curl -fsSL -L -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             "${KERNEL_URL}" -o /tmp/work/kernel.tar.gz
           echo "Kernel: $(ls -lh /tmp/work/kernel.tar.gz | awk '{print $5}')"
 
-          # Extract kernel
+          # Extract kernel with --strip-components=1 to remove version subdirectory
           mkdir -p /tmp/kernel
-          tar xzf /tmp/work/kernel.tar.gz -C /tmp/kernel/
+          tar xzf /tmp/work/kernel.tar.gz -C /tmp/kernel/ --strip-components=1
           echo "Kernel contents:"
           ls -la /tmp/kernel/
-          ls -la /tmp/kernel/boot/ 2>/dev/null
-          ls /tmp/kernel/dtb/rockchip/ 2>/dev/null | head -5
-          ls /tmp/kernel/lib/modules/ 2>/dev/null
+          ls -la /tmp/kernel/boot/
+          ls /tmp/kernel/dtb/rockchip/ | head -5
+          ls /tmp/kernel/lib/modules/
 
       - name: Get Rock-3B u-boot files
         run: |
           mkdir -p /tmp/uboot
-          # Download from ophub/u-boot repo
           curl -fsSL -L \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             "https://github.com/ophub/u-boot/raw/main/rockchip/rock-3b/idbloader.img" \
@@ -139,56 +135,44 @@ jobs:
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             "https://github.com/ophub/u-boot/raw/main/rockchip/rock-3b/u-boot.itb" \
             -o /tmp/uboot/u-boot.itb
-          echo "U-Boot files:"
+          echo "U-Boot:"
           ls -lh /tmp/uboot/
 
       - name: Build custom Armbian image
         run: |
-          # Decompress base image
           gzip -d /tmp/work/base.img.gz
           IMG="/tmp/work/base.img"
 
-          # Get partition info
           parted -s "${IMG}" unit s print
 
-          # Set up loop device
           LOOP=$(sudo losetup -fP --show "${IMG}")
           sudo partprobe "${LOOP}"
           sleep 2
 
-          # Find partitions
-          ls ${LOOP}* 2>/dev/null
-
-          # Mount partitions (single ext4 layout)
           sudo mkdir -p /mnt/rootfs
-          # Try partition 1 first, then fallback
           sudo mount "${LOOP}p1" /mnt/rootfs 2>/dev/null || sudo mount "${LOOP}1" /mnt/rootfs 2>/dev/null
 
           ROOT_UUID=$(sudo blkid -s UUID -o value "${LOOP}p1" 2>/dev/null || sudo blkid -s UUID -o value "${LOOP}1" 2>/dev/null)
           echo "ROOT_UUID: ${ROOT_UUID}"
 
           BOOT_DIR="/mnt/rootfs/boot"
-          echo "Boot dir contents:"
+          echo "Boot dir:"
           sudo ls -la "${BOOT_DIR}/" | head -20
 
-          # Find existing kernel version
           KVER=$(sudo ls /mnt/rootfs/lib/modules/ 2>/dev/null | head -1)
-          echo "Existing kernel: ${KVER}"
           NEW_KVER=$(ls /tmp/kernel/lib/modules/ 2>/dev/null | head -1)
-          echo "New kernel: ${NEW_KVER}"
+          echo "Old kernel: ${KVER} -> New: ${NEW_KVER}"
 
-          # Install u-boot to image (write at sector 64 and 16384)
+          # Install u-boot
           echo "Installing u-boot..."
           sudo dd if=/tmp/uboot/idbloader.img of="${IMG}" conv=fsync,notrunc bs=512 seek=64
           sudo dd if=/tmp/uboot/u-boot.itb of="${IMG}" conv=fsync,notrunc bs=512 seek=16384
           echo "U-Boot installed"
 
           # Replace kernel Image
-          if [ -f "${BOOT_DIR}/Image" ]; then
-            sudo mv "${BOOT_DIR}/Image" "${BOOT_DIR}/Image.old"
-          fi
+          [ -f "${BOOT_DIR}/Image" ] && sudo mv "${BOOT_DIR}/Image" "${BOOT_DIR}/Image.old"
           sudo cp /tmp/kernel/boot/Image "${BOOT_DIR}/Image"
-          echo "Kernel Image replaced"
+          echo "Image replaced"
 
           # Replace DTBs
           sudo mkdir -p "${BOOT_DIR}/dtb/rockchip"
@@ -196,41 +180,31 @@ jobs:
           echo "DTBs: $(sudo find ${BOOT_DIR} -name '*.dtb' | wc -l)"
 
           # Replace modules
-          if [ -n "$KVER" ] && [ -d "/mnt/rootfs/lib/modules/${KVER}" ]; then
-            sudo rm -rf "/mnt/rootfs/lib/modules/${KVER}"
-          fi
-          if [ -n "$NEW_KVER" ] && [ -d "/tmp/kernel/lib/modules/${NEW_KVER}" ]; then
-            sudo cp -a "/tmp/kernel/lib/modules/${NEW_KVER}" /mnt/rootfs/lib/modules/
-            echo "Modules replaced: ${NEW_KVER}"
-          fi
+          [ -n "$KVER" ] && sudo rm -rf "/mnt/rootfs/lib/modules/${KVER}"
+          sudo cp -a /tmp/kernel/lib/modules/* /mnt/rootfs/lib/modules/
+          echo "Modules replaced: $(sudo ls /mnt/rootfs/lib/modules/)"
 
-          # Update boot config - point to rock-3b DTB (compatible with YF-023D)
-          for conf in "${BOOT_DIR}/armbianEnv.txt" "${BOOT_DIR}/extlinux/extlinux.conf"; do
-            if [ -f "$conf" ]; then
-              echo "=== $conf ==="
-              cat "$conf"
-              echo "==="
-            fi
-          done
-
-          # Write new extlinux.conf for boot
+          # Write extlinux.conf
           sudo mkdir -p "${BOOT_DIR}/extlinux"
-          sudo bash -c "cat > ${BOOT_DIR}/extlinux/extlinux.conf" << 'EXTEOF'
+          sudo bash -c "cat > ${BOOT_DIR}/extlinux/extlinux.conf" << EXTEOF
           LABEL Armbian
             LINUX /boot/Image
             INITRD /boot/uInitrd
             FDT /boot/dtb/rockchip/rk3568-rock-3b.dtb
-            APPEND root=UUID=ROOTUUID_PLACEHOLDER console=ttyS2,1500000 console=tty1 rootwait rootfstype=ext4
+            APPEND root=UUID=${ROOT_UUID} console=ttyS2,1500000 console=tty1 rootwait rootfstype=ext4
           EXTEOF
-          sudo sed -i "s|ROOTUUID_PLACEHOLDER|${ROOT_UUID}|" "${BOOT_DIR}/extlinux/extlinux.conf"
-          echo "extlinux.conf:"
+
+          # Also update armbianEnv.txt if exists
+          if [ -f "${BOOT_DIR}/armbianEnv.txt" ]; then
+            sudo sed -i "s|rootdev=.*|rootdev=UUID=${ROOT_UUID}|" "${BOOT_DIR}/armbianEnv.txt" 2>/dev/null || true
+          fi
+
+          echo "=== extlinux.conf ==="
           cat "${BOOT_DIR}/extlinux/extlinux.conf"
 
-          # Cleanup
           sudo umount /mnt/rootfs
           sudo losetup -d "${LOOP}"
 
-          # Compress
           gzip -9 /tmp/work/base.img
           echo "Build complete"
 
