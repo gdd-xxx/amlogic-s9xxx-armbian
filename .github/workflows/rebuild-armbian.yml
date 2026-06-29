@@ -77,9 +77,9 @@ jobs:
       - name: Get Rock-3B u-boot
         run: |
           mkdir -p /tmp/uboot
-          curl -fsSL -L "https://github.com/ophub/u-boot/raw/main/rockchip/rock-3b/idbloader.img" \
+          curl -fsSL -L "https://github.com/ophub/u-boot/raw/main/u-boot/rockchip/rock-3b/idbloader.img" \
             -o /tmp/uboot/idbloader.img
-          curl -fsSL -L "https://github.com/ophub/u-boot/raw/main/rockchip/rock-3b/u-boot.itb" \
+          curl -fsSL -L "https://github.com/ophub/u-boot/raw/main/u-boot/rockchip/rock-3b/u-boot.itb" \
             -o /tmp/uboot/u-boot.itb
           echo "U-Boot:"; ls -lh /tmp/uboot/
 
@@ -118,9 +118,7 @@ jobs:
 
           # Replace modules
           KVER=$(sudo ls /mnt/rootfs/lib/modules/ 2>/dev/null | head -1)
-          NEW_KVER=$(ls /tmp/kernel/ | grep -E '^[0-9]+\.' | head -1)
-          [ -z "$NEW_KVER" ] && NEW_KVER=$(grep "^SUBLEVEL" /tmp/kernel/Makefile | awk '{print $3}')
-          echo "Old: ${KVER} -> New: ${NEW_KVER}"
+          echo "Old kernel: ${KVER}"
           [ -n "$KVER" ] && sudo rm -rf "/mnt/rootfs/lib/modules/${KVER}"
           sudo make -C /tmp/kernel ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- INSTALL_MOD_PATH=/mnt/rootfs modules_install
           echo "Modules installed"
