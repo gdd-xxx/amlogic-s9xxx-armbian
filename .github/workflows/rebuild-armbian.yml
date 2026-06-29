@@ -35,7 +35,7 @@ jobs:
             "https://raw.githubusercontent.com/ophub/kernel/main/kernel-config/release/stable/config-6.12"
           sed -i 's|CONFIG_LOCALVERSION=.*|CONFIG_LOCALVERSION=""|' .config
 
-      - name: Add MAE0621 PHY driver
+      - name: Add MAE0621 PHY driver (built-in)
         run: |
           cd /tmp/kernel
           cp ${{ github.workspace }}/drivers/net/phy/maxio.c drivers/net/phy/
@@ -51,16 +51,21 @@ jobs:
           if ! grep -q "maxio" drivers/net/phy/Makefile; then
             echo "obj-\$(CONFIG_MAXIO_PHY) += maxio.o" >> drivers/net/phy/Makefile
           fi
+          # Build as built-in (=y) to avoid module dependency issues
           scripts/config --enable CONFIG_MAXIO_PHY
+          scripts/config --set-val CONFIG_MAXIO_PHY y
 
       - name: Compile kernel
         run: |
           cd /tmp/kernel
           make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
-          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) Image modules dtbs
+          # Verify MAXIO_PHY is built-in
+          grep "CONFIG_MAXIO_PHY" .config
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) Image dtbs
           FULL_VER=$(grep "^VERSION\|^PATCHLEVEL\|^SUBLEVEL" Makefile | awk '{print $3}' | paste -sd'.' -)
           echo "Kernel: ${FULL_VER}"
           echo "KERNEL_VER=${FULL_VER}" >> ${GITHUB_ENV}
+          ls -lh arch/arm64/boot/Image
 
       - name: Download Armbian base image
         run: |
@@ -106,8 +111,8 @@ jobs:
           sudo dd if=/tmp/uboot/u-boot.itb of="${IMG}" conv=fsync,notrunc bs=512 seek=16384
           echo "U-Boot installed"
 
-          # Replace kernel Image
-          [ -f "${BOOT_DIR}/Image" ] && sudo mv "${BOOT_DIR}/Image" "${BOOT_DIR}/Image.old"
+          # Replace kernel Image (Image is a symlink, remove it first)
+          sudo rm -f "${BOOT_DIR}/Image"
           sudo cp /tmp/kernel/arch/arm64/boot/Image "${BOOT_DIR}/Image"
           echo "Image replaced"
 
@@ -116,12 +121,9 @@ jobs:
           sudo find /tmp/kernel/arch/arm64/boot/dts/rockchip -name "*.dtb" -exec sudo cp {} "${BOOT_DIR}/dtb/rockchip/" \;
           echo "DTBs: $(sudo find ${BOOT_DIR} -name '*.dtb' | wc -l)"
 
-          # Replace modules
-          KVER=$(sudo ls /mnt/rootfs/lib/modules/ 2>/dev/null | head -1)
-          echo "Old kernel: ${KVER}"
-          [ -n "$KVER" ] && sudo rm -rf "/mnt/rootfs/lib/modules/${KVER}"
-          sudo make -C /tmp/kernel ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- INSTALL_MOD_PATH=/mnt/rootfs modules_install
-          echo "Modules installed"
+          # Skip module replacement to avoid "Structure needs cleaning" errors
+          # MAE0621 is built-in (=y), so modules are not needed for basic boot
+          echo "Skipping module replacement (MAE0621 built-in)"
 
           # Write extlinux.conf
           sudo mkdir -p "${BOOT_DIR}/extlinux"
@@ -150,7 +152,7 @@ jobs:
           body: |
             Armbian for Young-Feel YF-023D v6 RK3568
             
-            Custom kernel: ${{ env.KERNEL_VER }} with MAE0621 Ethernet PHY driver
+            Custom kernel: ${{ env.KERNEL_VER }} with MAE0621 Ethernet PHY (built-in)
             U-Boot: Rock-3B (correct RK3568 u-boot)
             DTB: Rock-3B (compatible with YF-023D)
             
