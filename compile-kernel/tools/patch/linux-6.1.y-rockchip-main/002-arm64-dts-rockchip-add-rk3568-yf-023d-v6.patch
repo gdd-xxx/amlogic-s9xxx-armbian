@@ -12,16 +12,15 @@ index 909dc04..9801e53 100644
  # Armbian: Incremental: assuming overlay targets are already in the Makefile
 diff --git a/arch/arm64/boot/dts/rockchip/rk3568-yf-023d-v6.dts b/arch/arm64/boot/dts/rockchip/rk3568-yf-023d-v6.dts
 new file mode 100644
-index 0000000..aaa8b0d
+index 0000000..0842734
 --- /dev/null
 +++ b/arch/arm64/boot/dts/rockchip/rk3568-yf-023d-v6.dts
 @@ -0,0 +1,87 @@
 +// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
 +/*
-+ * YoungFeel YF-023D v6 (RK3568 + Maxio MAE0621A PHY)
-+ * Based on the Hlink H68K reference design, proven to boot on this hardware.
-+ * Differences vs h68k:
-+ *  - gmac1 PHY reset moved to GPIO3 B0 (validated on real hardware)
++ * YoungFeel YF-023D v6 (RK3568 + Maxio MAE0621A).
++ * Cloned from proven-booting rk3568-hlink-h68k reference.
++ * Delta vs h68k: model/compatible + gmac1 PHY reset moved to GPIO3 B0.
 + */
 +
 +/dts-v1/;
@@ -33,73 +32,74 @@ index 0000000..aaa8b0d
 +	compatible = "youngfeel,yf-023d-v6", "hlink,h68k", "rockchip,rk3568";
 +
 +	aliases {
-+	\tethernet0 = &gmac0;
-+	\tethernet1 = &gmac1;
++		ethernet0 = &gmac0;
++		ethernet1 = &gmac1;
 +	};
 +};
 +
 +&gmac0 {
 +	phy-mode = "rgmii";
-+\tclock_in_out = "output";
++	clock_in_out = "output";
 +
-+\tsnps,reset-gpio = <&gpio2 RK_PD3 GPIO_ACTIVE_LOW>;
-+\tsnps,reset-active-low;
-+\tsnps,reset-delays-us = <0 20000 100000>;
++	snps,reset-gpio = <&gpio2 RK_PD3 GPIO_ACTIVE_LOW>;
++	snps,reset-active-low;
++	/* Reset time is 20ms, 100ms for rtl8211f */
++	snps,reset-delays-us = <0 20000 100000>;
 +
-+\tassigned-clocks = <&cru SCLK_GMAC0_RX_TX>, <&cru SCLK_GMAC0>;
-+\tassigned-clock-parents = <&cru SCLK_GMAC0_RGMII_SPEED>, <&cru CLK_MAC0_2TOP>;
-+\tassigned-clock-rates = <0>, <125000000>;
++	assigned-clocks = <&cru SCLK_GMAC0_RX_TX>, <&cru SCLK_GMAC0>;
++	assigned-clock-parents = <&cru SCLK_GMAC0_RGMII_SPEED>, <&cru CLK_MAC0_2TOP>;
++	assigned-clock-rates = <0>, <125000000>;
 +
-+\tpinctrl-names = "default";
-+\tpinctrl-0 = <&gmac0_miim
-+\t\t     &gmac0_tx_bus2
-+\t\t     &gmac0_rx_bus2
-+\t\t     &gmac0_rgmii_clk
-+\t\t     &gmac0_rgmii_bus>;
++	pinctrl-names = "default";
++	pinctrl-0 = <&gmac0_miim
++		     &gmac0_tx_bus2
++		     &gmac0_rx_bus2
++		     &gmac0_rgmii_clk
++		     &gmac0_rgmii_bus>;
 +
-+\ttx_delay = <0x2e>;
-+\trx_delay = <0x28>;
++	tx_delay = <0x2e>;
++	rx_delay = <0x28>;
 +
-+\tphy-handle = <&rgmii_phy0>;
-+\tstatus = "okay";
++	phy-handle = <&rgmii_phy0>;
++	status = "okay";
 +};
 +
 +&gmac1 {
-+\tphy-mode = "rgmii";
-+\tclock_in_out = "output";
++	phy-mode = "rgmii";
++	clock_in_out = "output";
 +
-+\tassigned-clocks = <&cru SCLK_GMAC1_RX_TX>, <&cru SCLK_GMAC1>;
-+\tassigned-clock-parents = <&cru SCLK_GMAC1_RGMII_SPEED>, <&cru CLK_MAC1_2TOP>;
-+\tassigned-clock-rates = <0>, <125000000>;
++	assigned-clocks = <&cru SCLK_GMAC1_RX_TX>, <&cru SCLK_GMAC1>;
++	assigned-clock-parents = <&cru SCLK_GMAC1_RGMII_SPEED>, <&cru CLK_MAC1_2TOP>;
++	assigned-clock-rates = <0>, <125000000>;
 +
-+\tpinctrl-names = "default";
-+\tpinctrl-0 = <&gmac1m1_miim
-+\t\t     &gmac1m1_tx_bus2
-+\t\t     &gmac1m1_rx_bus2
-+\t\t     &gmac1m1_rgmii_clk
-+\t\t     &gmac1m1_rgmii_bus>;
++	pinctrl-names = "default";
++	pinctrl-0 = <&gmac1m1_miim
++		     &gmac1m1_tx_bus2
++		     &gmac1m1_rx_bus2
++		     &gmac1m1_rgmii_clk
++		     &gmac1m1_rgmii_bus>;
 +
-+\ttx_delay = <0x42>;
-+\trx_delay = <0x25>;
++	tx_delay = <0x42>;
++	rx_delay = <0x25>;
 +
-+\tphy-handle = <&rgmii_phy1>;
-+\tstatus = "okay";
++	phy-handle = <&rgmii_phy1>;
++	status = "okay";
 +};
 +
 +&mdio0 {
-+\trgmii_phy0: phy@0 {
-+\t\tcompatible = "ethernet-phy-ieee802.3-c22";
-+\t\treg = <0x0>;
-+\t};
++	rgmii_phy0: phy@0 {
++		compatible = "ethernet-phy-ieee802.3-c22";
++		reg = <0x0>;
++	};
 +};
 +
 +&mdio1 {
-+\trgmii_phy1: phy@0 {
-+\t\tcompatible = "ethernet-phy-ieee802.3-c22";
-+\t\treg = <0x0>;
-+\t\t/* YF-023D: MAE0621A reset on GPIO3 B0 (validated) */
-+\t\treset-gpios = <&gpio3 RK_PB0 GPIO_ACTIVE_LOW>;
-+\t\treset-assert-us = <20000>;
-+\t\treset-deassert-us = <100000>;
-+\t};
++	rgmii_phy1: phy@0 {
++		compatible = "ethernet-phy-ieee802.3-c22";
++		reg = <0x0>;
++		/* YF-023D: MAE0621A PHY reset on GPIO3 B0 (validated on hardware) */
++		reset-gpios = <&gpio3 RK_PB0 GPIO_ACTIVE_LOW>;
++		reset-assert-us = <20000>;
++		reset-deassert-us = <100000>;
++	};
 +};
