@@ -12,15 +12,21 @@ index 909dc04..9801e53 100644
  # Armbian: Incremental: assuming overlay targets are already in the Makefile
 diff --git a/arch/arm64/boot/dts/rockchip/rk3568-yf-023d-v6.dts b/arch/arm64/boot/dts/rockchip/rk3568-yf-023d-v6.dts
 new file mode 100644
-index 0000000..0842734
+index 0000000..e49d542
 --- /dev/null
 +++ b/arch/arm64/boot/dts/rockchip/rk3568-yf-023d-v6.dts
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,108 @@
 +// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
 +/*
 + * YoungFeel YF-023D v6 (RK3568 + Maxio MAE0621A).
 + * Cloned from proven-booting rk3568-hlink-h68k reference.
-+ * Delta vs h68k: model/compatible + gmac1 PHY reset moved to GPIO3 B0.
++ *
++ * Key differences vs h68k:
++ *   1. Disable "work" LED on GPIO3 B0 (h68k uses it as LED,
++ *      YF-023D uses it as PHY reset).
++ *   2. Add MAC-level snps,reset-gpio on gmac1 (fe010000) so
++ *      stmmac releases PHY reset BEFORE MDIO bus scan.
++ *   3. Keep PHY-level reset-gpios for runtime PHY management.
 + */
 +
 +/dts-v1/;
@@ -35,8 +41,14 @@ index 0000000..0842734
 +		ethernet0 = &gmac0;
 +		ethernet1 = &gmac1;
 +	};
++
++	/* Disable work LED — GPIO3 B0 is needed for PHY reset */
++	leds {
++		status = "disabled";
++	};
 +};
 +
++/* fe2a0000 — h68k's primary GMAC (uses internal switch, keep as-is) */
 +&gmac0 {
 +	phy-mode = "rgmii";
 +	clock_in_out = "output";
@@ -64,9 +76,18 @@ index 0000000..0842734
 +	status = "okay";
 +};
 +
++/* fe010000 — YF-023D external PHY port (MAE0621A) */
 +&gmac1 {
 +	phy-mode = "rgmii";
 +	clock_in_out = "output";
++
++	/*
++	 * CRITICAL: MAC-level reset BEFORE MDIO bus scan.
++	 * Without this, PHY stays in reset during probe → MDIO reads return 0xFFFF.
++	 */
++	snps,reset-gpio = <&gpio3 RK_PB0 GPIO_ACTIVE_LOW>;
++	snps,reset-active-low;
++	snps,reset-delays-us = <0 20000 100000>;
 +
 +	assigned-clocks = <&cru SCLK_GMAC1_RX_TX>, <&cru SCLK_GMAC1>;
 +	assigned-clock-parents = <&cru SCLK_GMAC1_RGMII_SPEED>, <&cru CLK_MAC1_2TOP>;
