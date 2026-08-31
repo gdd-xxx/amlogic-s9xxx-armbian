@@ -12,18 +12,18 @@ index 909dc04..9801e53 100644
  # Armbian: Incremental: assuming overlay targets are already in the Makefile
 diff --git a/arch/arm64/boot/dts/rockchip/rk3568-yf-023d-v6.dts b/arch/arm64/boot/dts/rockchip/rk3568-yf-023d-v6.dts
 new file mode 100644
-index 0000000..a1b2c3d
+index 0000000..b2c3d4e
 --- /dev/null
 +++ b/arch/arm64/boot/dts/rockchip/rk3568-yf-023d-v6.dts
-@@ -0,0 +1,419 @@
+@@ -0,0 +1,422 @@
 +// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
 +/*
 + * YoungFeel YF-023D v6 (RK3568 + Maxio MAE0621A Ethernet PHY).
 + * Based on rk3568-hlink-h68k reference, restructured for YF-023D hardware.
 + *
 + * Key differences vs h68k:
-+ *   1. Single GMAC1 only (no GMAC0) 鈥?external PHY via MDIO1.
-+ *   2. PHY reset on GPIO3 B0 鈥?must disable h68k's "work" LED that
++ *   1. Single GMAC1 only (no GMAC0) — external PHY via MDIO1.
++ *   2. PHY reset on GPIO3 B0 — must disable h68k's "work" LED that
 + *      occupies the same pin.
 + *   3. GMAC1 uses RGMII-ID with external 125 MHz reference clock.
 + *   4. PCIe layout: pcie2x1 (WiFi) + pcie3x2 only (no bifurcation).
@@ -33,6 +33,9 @@ index 0000000..a1b2c3d
 + */
 +
 +/dts-v1/;
++#include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/leds/common.h>
++#include <dt-bindings/pinctrl/rockchip.h>
 +
 +#include "rk3568-hlink.dtsi"
 +
@@ -155,7 +158,7 @@ index 0000000..a1b2c3d
 +	};
 +};
 +
-+/* ===== Disable GMAC0 鈥?YF-023D has only GMAC1 ===== */
++/* ===== Disable GMAC0 — YF-023D has only GMAC1 ===== */
 +&gmac0 {
 +	status = "disabled";
 +};
@@ -178,7 +181,7 @@ index 0000000..a1b2c3d
 +		     &gmac1m1_rgmii_bus>;
 +	/*
 +	 * CRITICAL: MAC-level reset so stmmac releases PHY
-+	 * BEFORE MDIO bus scan 鈥?otherwise PHY reads 0xFFFF.
++	 * BEFORE MDIO bus scan — otherwise PHY reads 0xFFFF.
 +	 */
 +	snps,reset-gpio = <&gpio3 RK_PB0 GPIO_ACTIVE_LOW>;
 +	snps,reset-active-low;
@@ -201,12 +204,12 @@ index 0000000..a1b2c3d
 +	};
 +};
 +
-+/* ===== Disable h68k's LED block 鈥?we redefine it above ===== */
++/* ===== Disable h68k's LED block — we redefine it above ===== */
 +&leds {
 +	status = "disabled";
 +};
 +
-+/* ===== I2C0: CPU regulator 鈥?SYR827 (not TCS4525) ===== */
++/* ===== I2C0: CPU regulator — SYR827 (not TCS4525) ===== */
 +&i2c0 {
 +	tcs4525: regulator@40 {
 +		compatible = "silergy,syr827";
@@ -254,7 +257,7 @@ index 0000000..a1b2c3d
 +	status = "okay";
 +};
 +
-+/* ===== Disable PCIe 3.0 x1 bifurcation 鈥?not present on YF-023D ===== */
++/* ===== Disable PCIe 3.0 x1 bifurcation — not present on YF-023D ===== */
 +&pcie3x1 {
 +	status = "disabled";
 +};
