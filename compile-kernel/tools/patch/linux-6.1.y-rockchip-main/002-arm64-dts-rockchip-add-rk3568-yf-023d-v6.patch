@@ -15,7 +15,7 @@ new file mode 100644
 index 0000000..b2c3d4e
 --- /dev/null
 +++ b/arch/arm64/boot/dts/rockchip/rk3568-yf-023d-v6.dts
-@@ -0,0 +1,421 @@
+@@ -0,0 +1,414 @@
 +// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
 +/*
 + * YoungFeel YF-023D v6 (RK3568 + Maxio MAE0621A Ethernet PHY).
@@ -145,17 +145,7 @@ index 0000000..b2c3d4e
 +		reset-gpios = <&gpio3 RK_PD4 GPIO_ACTIVE_LOW>;
 +	};
 +
-+	/* ===== HDMI connector ===== */
-+	hdmi-con {
-+		compatible = "hdmi-connector";
-+		type = "a";
-+
-+		port {
-+			hdmi_con_in: endpoint {
-+				remote-endpoint = <&hdmi_out_con>;
-+			};
-+		};
-+	};
++	/* HDMI connector — removed: BSP HDMI node lacks hdmi_out_con label */
 +};
 +
 +/* ===== Disable GMAC0 — YF-023D has only GMAC1 ===== */
@@ -405,6 +395,9 @@ index 0000000..b2c3d4e
 +	pcie {
 +		pcie_enable_h: pcie-enable-h {
 +			rockchip,pins = <0 RK_PD4 RK_FUNC_GPIO &pcfg_pull_none>;
++		};
++		pcie2x1_pins: pcie2x1-pins {
++			rockchip,pins = <2 RK_PC4 RK_FUNC_PCIE &pcfg_pull_none>;
 +		};
 +	};
 +
