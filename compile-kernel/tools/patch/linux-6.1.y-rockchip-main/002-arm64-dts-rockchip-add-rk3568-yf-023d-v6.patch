@@ -15,7 +15,7 @@ new file mode 100644
 index 0000000..b2c3d4e
 --- /dev/null
 +++ b/arch/arm64/boot/dts/rockchip/rk3568-yf-023d-v6.dts
-@@ -0,0 +1,422 @@
+@@ -0,0 +1,421 @@
 +// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
 +/*
 + * YoungFeel YF-023D v6 (RK3568 + Maxio MAE0621A Ethernet PHY).
@@ -308,8 +308,8 @@ index 0000000..b2c3d4e
 +	};
 +};
 +
-+/* ===== NAND controller ===== */
-+&nandc {
++/* ===== NAND controller (BSP label is nandc0) ===== */
++&nandc0 {
 +	status = "okay";
 +
 +	nand@0 {
@@ -342,29 +342,28 @@ index 0000000..b2c3d4e
 +	};
 +};
 +
-+/* ===== USB Host 0: with OTG extcon ===== */
-+&usb_host0_xhci {
-+	extcon = <&usb2phy0>;
++/* ===== USB3 Host (BSP DWC3, not XHCI) ===== */
++&usbhost30 {
 +	status = "okay";
 +};
 +
-+/* ===== USB Host 1: no extcon ===== */
-+&usb_host1_xhci {
++&usbhost_dwc3 {
++	dr_mode = "host";
 +	status = "okay";
 +};
 +
-+/* ===== USB2 PHYs with power supplies ===== */
-+&usb2phy0_host {
++/* ===== USB2 PHYs with power supplies (BSP labels: u2phy0/1_host/otg) ===== */
++&u2phy0_host {
 +	phy-supply = <&vcc5v0_usb_host>;
 +	status = "okay";
 +};
 +
-+&usb2phy0_otg {
++&u2phy0_otg {
 +	phy-supply = <&vcc5v0_usb_otg>;
 +	status = "okay";
 +};
 +
-+&usb2phy1_host {
++&u2phy1_host {
 +	phy-supply = <&vcc5v0_usb_host>;
 +	status = "okay";
 +};
