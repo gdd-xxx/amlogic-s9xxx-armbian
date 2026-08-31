@@ -12,21 +12,24 @@ index 909dc04..9801e53 100644
  # Armbian: Incremental: assuming overlay targets are already in the Makefile
 diff --git a/arch/arm64/boot/dts/rockchip/rk3568-yf-023d-v6.dts b/arch/arm64/boot/dts/rockchip/rk3568-yf-023d-v6.dts
 new file mode 100644
-index 0000000..e49d542
+index 0000000..a1b2c3d
 --- /dev/null
 +++ b/arch/arm64/boot/dts/rockchip/rk3568-yf-023d-v6.dts
-@@ -0,0 +1,108 @@
+@@ -0,0 +1,419 @@
 +// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
 +/*
-+ * YoungFeel YF-023D v6 (RK3568 + Maxio MAE0621A).
-+ * Cloned from proven-booting rk3568-hlink-h68k reference.
++ * YoungFeel YF-023D v6 (RK3568 + Maxio MAE0621A Ethernet PHY).
++ * Based on rk3568-hlink-h68k reference, restructured for YF-023D hardware.
 + *
 + * Key differences vs h68k:
-+ *   1. Disable "work" LED on GPIO3 B0 (h68k uses it as LED,
-+ *      YF-023D uses it as PHY reset).
-+ *   2. Add MAC-level snps,reset-gpio on gmac1 (fe010000) so
-+ *      stmmac releases PHY reset BEFORE MDIO bus scan.
-+ *   3. Keep PHY-level reset-gpios for runtime PHY management.
++ *   1. Single GMAC1 only (no GMAC0) 鈥?external PHY via MDIO1.
++ *   2. PHY reset on GPIO3 B0 鈥?must disable h68k's "work" LED that
++ *      occupies the same pin.
++ *   3. GMAC1 uses RGMII-ID with external 125 MHz reference clock.
++ *   4. PCIe layout: pcie2x1 (WiFi) + pcie3x2 only (no bifurcation).
++ *   5. WiFi (sdmmc2) + Bluetooth (uart1/BCM43438) + RTC (i2c5/PCF8563).
++ *   6. PMIC: SYR827 CPU regulator (not TCS4525).
++ *   7. USB host with separate OTG/Host power enable pins.
 + */
 +
 +/dts-v1/;
@@ -35,92 +38,400 @@ index 0000000..e49d542
 +
 +/ {
 +	model = "YoungFeel YF-023D v6";
-+	compatible = "youngfeel,yf-023d-v6", "hlink,h68k", "rockchip,rk3568";
++	compatible = "youngfeel,yf-023d-v6", "rockchip,rk3568";
 +
 +	aliases {
-+		ethernet0 = &gmac0;
-+		ethernet1 = &gmac1;
++		ethernet0 = &gmac1;
++		mmc0 = &sdhci;
++		mmc1 = &sdmmc0;
++		mmc2 = &sdmmc2;
 +	};
 +
-+	/* Disable work LED — GPIO3 B0 is needed for PHY reset */
++	/* ===== GMAC1 external 125 MHz reference clock ===== */
++	gmac1_clkin: external-gmac1-clock {
++		compatible = "fixed-clock";
++		clock-frequency = <125000000>;
++		clock-output-names = "gmac1_clkin";
++		#clock-cells = <0>;
++	};
++
++	/* ===== USB 5V base supply ===== */
++	vcc5v0_usb: vcc5v0-usb-regulator {
++		compatible = "regulator-fixed";
++		regulator-name = "vcc5v0_usb";
++		regulator-always-on;
++		regulator-boot-on;
++		regulator-min-microvolt = <5000000>;
++		regulator-max-microvolt = <5000000>;
++		vin-supply = <&dc_12v>;
++	};
++
++	/* ===== USB Host 5V enable (GPIO0 A6) ===== */
++	vcc5v0_usb_host: vcc5v0-usb-host-regulator {
++		compatible = "regulator-fixed";
++		enable-active-high;
++		gpio = <&gpio0 RK_PA6 GPIO_ACTIVE_HIGH>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&vcc5v0_usb_host_en>;
++		regulator-name = "vcc5v0_usb_host";
++		regulator-min-microvolt = <5000000>;
++		regulator-max-microvolt = <5000000>;
++		vin-supply = <&vcc5v0_usb>;
++	};
++
++	/* ===== USB OTG 5V enable (GPIO0 A5) ===== */
++	vcc5v0_usb_otg: vcc5v0-usb-otg-regulator {
++		compatible = "regulator-fixed";
++		enable-active-high;
++		gpio = <&gpio0 RK_PA5 GPIO_ACTIVE_HIGH>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&vcc5v0_usb_otg_en>;
++		regulator-name = "vcc5v0_usb_otg";
++		regulator-min-microvolt = <5000000>;
++		regulator-max-microvolt = <5000000>;
++		vin-supply = <&vcc5v0_usb>;
++	};
++
++	/* ===== PCIe 3.3V supply (PI6C-03 switch) ===== */
++	vcc3v3_pi6c_03: vcc3v3-pi6c-03-regulator {
++		compatible = "regulator-fixed";
++		regulator-name = "vcc3v3_pi6c_03";
++		regulator-always-on;
++		regulator-boot-on;
++		regulator-min-microvolt = <3300000>;
++		regulator-max-microvolt = <3300000>;
++		vin-supply = <&vcc5v0_sys>;
++	};
++
++	/* ===== PCIe 3.3V power enable (GPIO0 D4) ===== */
++	vcc3v3_pcie: vcc3v3-pcie-regulator {
++		compatible = "regulator-fixed";
++		enable-active-high;
++		gpios = <&gpio0 RK_PD4 GPIO_ACTIVE_HIGH>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&pcie_enable_h>;
++		regulator-name = "vcc3v3_pcie";
++		regulator-min-microvolt = <3300000>;
++		regulator-max-microvolt = <3300000>;
++		vin-supply = <&vcc5v0_sys>;
++	};
++
++	/* ===== Heartbeat LED (GPIO0 B0) ===== */
 +	leds {
-+		status = "disabled";
++		compatible = "gpio-leds";
++
++		led_user: led-0 {
++			gpios = <&gpio0 RK_PB0 GPIO_ACTIVE_HIGH>;
++			function = LED_FUNCTION_HEARTBEAT;
++			color = <LED_COLOR_ID_BLUE>;
++			linux,default-trigger = "heartbeat";
++			pinctrl-names = "default";
++			pinctrl-0 = <&led_user_en>;
++		};
++	};
++
++	/* ===== SDIO WiFi power sequence (GPIO3 D4) ===== */
++	sdio_pwrseq: sdio-pwrseq {
++		compatible = "mmc-pwrseq-simple";
++		clocks = <&rk809 1>;
++		clock-names = "ext_clock";
++		pinctrl-names = "default";
++		pinctrl-0 = <&wifi_enable>;
++		post-power-on-delay-ms = <200>;
++		power-off-delay-us = <5000000>;
++		reset-gpios = <&gpio3 RK_PD4 GPIO_ACTIVE_LOW>;
++	};
++
++	/* ===== HDMI connector ===== */
++	hdmi-con {
++		compatible = "hdmi-connector";
++		type = "a";
++
++		port {
++			hdmi_con_in: endpoint {
++				remote-endpoint = <&hdmi_out_con>;
++			};
++		};
 +	};
 +};
 +
-+/* fe2a0000 — h68k's primary GMAC (uses internal switch, keep as-is) */
++/* ===== Disable GMAC0 鈥?YF-023D has only GMAC1 ===== */
 +&gmac0 {
-+	phy-mode = "rgmii";
-+	clock_in_out = "output";
-+
-+	snps,reset-gpio = <&gpio2 RK_PD3 GPIO_ACTIVE_LOW>;
-+	snps,reset-active-low;
-+	/* Reset time is 20ms, 100ms for rtl8211f */
-+	snps,reset-delays-us = <0 20000 100000>;
-+
-+	assigned-clocks = <&cru SCLK_GMAC0_RX_TX>, <&cru SCLK_GMAC0>;
-+	assigned-clock-parents = <&cru SCLK_GMAC0_RGMII_SPEED>, <&cru CLK_MAC0_2TOP>;
-+	assigned-clock-rates = <0>, <125000000>;
-+
-+	pinctrl-names = "default";
-+	pinctrl-0 = <&gmac0_miim
-+		     &gmac0_tx_bus2
-+		     &gmac0_rx_bus2
-+		     &gmac0_rgmii_clk
-+		     &gmac0_rgmii_bus>;
-+
-+	tx_delay = <0x2e>;
-+	rx_delay = <0x28>;
-+
-+	phy-handle = <&rgmii_phy0>;
-+	status = "okay";
++	status = "disabled";
 +};
 +
-+/* fe010000 — YF-023D external PHY port (MAE0621A) */
++/* ===== GMAC1: factory config (RGMII-ID, external clock, PHY reset GPIO3 B0) ===== */
 +&gmac1 {
-+	phy-mode = "rgmii";
-+	clock_in_out = "output";
-+
-+	/*
-+	 * CRITICAL: MAC-level reset BEFORE MDIO bus scan.
-+	 * Without this, PHY stays in reset during probe → MDIO reads return 0xFFFF.
-+	 */
-+	snps,reset-gpio = <&gpio3 RK_PB0 GPIO_ACTIVE_LOW>;
-+	snps,reset-active-low;
-+	snps,reset-delays-us = <0 20000 100000>;
-+
 +	assigned-clocks = <&cru SCLK_GMAC1_RX_TX>, <&cru SCLK_GMAC1>;
-+	assigned-clock-parents = <&cru SCLK_GMAC1_RGMII_SPEED>, <&cru CLK_MAC1_2TOP>;
++	assigned-clock-parents = <&cru SCLK_GMAC1_RGMII_SPEED>, <&gmac1_clkin>;
 +	assigned-clock-rates = <0>, <125000000>;
-+
++	clock_in_out = "input";
++	phy-handle = <&rgmii_phy1>;
++	phy-mode = "rgmii-id";
++	phy-supply = <&vcc_3v3>;
 +	pinctrl-names = "default";
 +	pinctrl-0 = <&gmac1m1_miim
 +		     &gmac1m1_tx_bus2
 +		     &gmac1m1_rx_bus2
 +		     &gmac1m1_rgmii_clk
++		     &gmac1m1_clkinout
 +		     &gmac1m1_rgmii_bus>;
-+
++	/*
++	 * CRITICAL: MAC-level reset so stmmac releases PHY
++	 * BEFORE MDIO bus scan 鈥?otherwise PHY reads 0xFFFF.
++	 */
++	snps,reset-gpio = <&gpio3 RK_PB0 GPIO_ACTIVE_LOW>;
++	snps,reset-active-low;
++	snps,reset-delays-us = <0 20000 100000>;
 +	tx_delay = <0x42>;
 +	rx_delay = <0x25>;
-+
-+	phy-handle = <&rgmii_phy1>;
 +	status = "okay";
 +};
 +
-+&mdio0 {
-+	rgmii_phy0: phy@0 {
++/* ===== MDIO1: MAE0621A Ethernet PHY ===== */
++&mdio1 {
++	rgmii_phy1: ethernet-phy@0 {
 +		compatible = "ethernet-phy-ieee802.3-c22";
 +		reg = <0x0>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&eth_phy_rst>;
++		reset-assert-us = <20000>;
++		reset-deassert-us = <100000>;
++		reset-gpios = <&gpio3 RK_PB0 GPIO_ACTIVE_LOW>;
 +	};
 +};
 +
-+&mdio1 {
-+	rgmii_phy1: phy@0 {
-+		compatible = "ethernet-phy-ieee802.3-c22";
++/* ===== Disable h68k's LED block 鈥?we redefine it above ===== */
++&leds {
++	status = "disabled";
++};
++
++/* ===== I2C0: CPU regulator 鈥?SYR827 (not TCS4525) ===== */
++&i2c0 {
++	tcs4525: regulator@40 {
++		compatible = "silergy,syr827";
++		reg = <0x40>;
++		vin-supply = <&vcc5v0_sys>;
++		regulator-compatible = "fan53555-reg";
++		regulator-name = "vdd_cpu";
++		regulator-min-microvolt = <712500>;
++		regulator-max-microvolt = <1397500>;
++		regulator-ramp-delay = <2300>;
++		fcs,suspend-voltage-selector = <1>;
++		regulator-boot-on;
++		regulator-always-on;
++
++		regulator-state-mem {
++			regulator-off-in-suspend;
++		};
++	};
++};
++
++/* ===== I2C5: PCF8563 RTC ===== */
++&i2c5 {
++	pinctrl-names = "default";
++	pinctrl-0 = <&i2c5m1_xfer>;
++	status = "okay";
++
++	pcf8563: rtc@51 {
++		compatible = "nxp,pcf8563";
++		reg = <0x51>;
++		#clock-cells = <0>;
++		clock-output-names = "pcf8563";
++		interrupt-parent = <&gpio0>;
++		interrupts = <RK_PD3 IRQ_TYPE_LEVEL_LOW>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&pcf8563_int>;
++		wakeup-source;
++	};
++};
++
++/* ===== PCIe 2.1 x1 (WiFi, reset on GPIO3 C1) ===== */
++&pcie2x1 {
++	reset-gpios = <&gpio3 RK_PC1 GPIO_ACTIVE_HIGH>;
++	pinctrl-names = "default";
++	pinctrl-0 = <&pcie2x1_pins>;
++	status = "okay";
++};
++
++/* ===== Disable PCIe 3.0 x1 bifurcation 鈥?not present on YF-023D ===== */
++&pcie3x1 {
++	status = "disabled";
++};
++
++/* ===== PCIe 3.0 x2 (reset on GPIO2 D6) ===== */
++&pcie3x2 {
++	reset-gpios = <&gpio2 RK_PD6 GPIO_ACTIVE_HIGH>;
++	status = "okay";
++};
++
++/* ===== SD card: add card-detect GPIO ===== */
++&sdmmc0 {
++	cd-gpios = <&gpio0 RK_PA4 GPIO_ACTIVE_LOW>;
++};
++
++/* ===== SDIO WiFi ===== */
++&sdmmc2 {
++	bus-width = <4>;
++	disable-wp;
++	cap-sd-highspeed;
++	cap-sdio-irq;
++	keep-power-in-suspend;
++	mmc-pwrseq = <&sdio_pwrseq>;
++	non-removable;
++	pinctrl-names = "default";
++	pinctrl-0 = <&sdmmc2m0_bus4 &sdmmc2m0_cmd &sdmmc2m0_clk>;
++	sd-uhs-sdr12;
++	sd-uhs-sdr25;
++	sd-uhs-sdr50;
++	sd-uhs-sdr104;
++	vmmc-supply = <&vcc3v3_sys>;
++	vqmmc-supply = <&vcc_1v8>;
++	status = "okay";
++};
++
++/* ===== SPI NOR flash ===== */
++&sfc {
++	#address-cells = <1>;
++	#size-cells = <0>;
++	status = "okay";
++
++	flash@0 {
++		compatible = "jedec,spi-nor";
 +		reg = <0x0>;
-+		/* YF-023D: MAE0621A PHY reset on GPIO3 B0 (validated on hardware) */
-+		reset-gpios = <&gpio3 RK_PB0 GPIO_ACTIVE_LOW>;
-+		reset-assert-us = <20000>;
-+		reset-deassert-us = <100000>;
++		spi-max-frequency = <104000000>;
++		spi-rx-bus-width = <4>;
++		spi-tx-bus-width = <1>;
++	};
++};
++
++/* ===== NAND controller ===== */
++&nandc {
++	status = "okay";
++
++	nand@0 {
++		reg = <0>;
++		nand-ecc-mode = "hw";
++		nand-ecc-strength = <16>;
++		nand-ecc-step-size = <1024>;
++		nand-bus-width = <8>;
++	};
++};
++
++/* ===== UART1: Bluetooth (BCM43438) ===== */
++&uart1 {
++	pinctrl-names = "default";
++	pinctrl-0 = <&uart1m0_xfer &uart1m0_ctsn &uart1m0_rtsn>;
++	uart-has-rtscts;
++	status = "okay";
++
++	bluetooth {
++		compatible = "brcm,bcm43438-bt";
++		clocks = <&rk809 1>;
++		clock-names = "lpo";
++		device-wakeup-gpios = <&gpio4 RK_PB5 GPIO_ACTIVE_HIGH>;
++		host-wakeup-gpios = <&gpio4 RK_PB4 GPIO_ACTIVE_HIGH>;
++		shutdown-gpios = <&gpio4 RK_PB2 GPIO_ACTIVE_HIGH>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&bt_host_wake &bt_wake &bt_enable>;
++		vbat-supply = <&vcc3v3_sys>;
++		vddio-supply = <&vcc_1v8>;
++	};
++};
++
++/* ===== USB Host 0: with OTG extcon ===== */
++&usb_host0_xhci {
++	extcon = <&usb2phy0>;
++	status = "okay";
++};
++
++/* ===== USB Host 1: no extcon ===== */
++&usb_host1_xhci {
++	status = "okay";
++};
++
++/* ===== USB2 PHYs with power supplies ===== */
++&usb2phy0_host {
++	phy-supply = <&vcc5v0_usb_host>;
++	status = "okay";
++};
++
++&usb2phy0_otg {
++	phy-supply = <&vcc5v0_usb_otg>;
++	status = "okay";
++};
++
++&usb2phy1_host {
++	phy-supply = <&vcc5v0_usb_host>;
++	status = "okay";
++};
++
++/* ===== PMU IO domains (factory config) ===== */
++&pmu_io_domains {
++	pmuio1-supply = <&vcc3v3_pmu>;
++	pmuio2-supply = <&vcc3v3_pmu>;
++	vccio1-supply = <&vccio_acodec>;
++	vccio2-supply = <&vcc_1v8>;
++	vccio3-supply = <&vccio_sd>;
++	vccio4-supply = <&vcc_1v8>;
++	vccio5-supply = <&vcc_3v3>;
++	vccio6-supply = <&vcc_1v8>;
++	vccio7-supply = <&vcc_3v3>;
++	status = "okay";
++};
++
++/* ===== Pinctrl additions for YF-023D ===== */
++&pinctrl {
++	ethernet {
++		eth_phy_rst: eth_phy_rst {
++			rockchip,pins = <3 RK_PB0 RK_FUNC_GPIO &pcfg_pull_none>;
++		};
++	};
++
++	hym8563 {
++		pcf8563_int: pcf8563-int {
++			rockchip,pins = <0 RK_PD3 RK_FUNC_GPIO &pcfg_pull_up>;
++		};
++	};
++
++	leds {
++		led_user_en: led_user_en {
++			rockchip,pins = <0 RK_PB0 RK_FUNC_GPIO &pcfg_pull_none>;
++		};
++	};
++
++	pcie {
++		pcie_enable_h: pcie-enable-h {
++			rockchip,pins = <0 RK_PD4 RK_FUNC_GPIO &pcfg_pull_none>;
++		};
++	};
++
++	usb {
++		vcc5v0_usb_host_en: vcc5v0_usb_host_en {
++			rockchip,pins = <0 RK_PA6 RK_FUNC_GPIO &pcfg_pull_none>;
++		};
++		vcc5v0_usb_otg_en: vcc5v0_usb_otg_en {
++			rockchip,pins = <0 RK_PA5 RK_FUNC_GPIO &pcfg_pull_none>;
++		};
++	};
++
++	bt {
++		bt_enable: bt-enable {
++			rockchip,pins = <4 RK_PB2 RK_FUNC_GPIO &pcfg_pull_none>;
++		};
++
++		bt_host_wake: bt-host-wake {
++			rockchip,pins = <4 RK_PB4 RK_FUNC_GPIO &pcfg_pull_down>;
++		};
++
++		bt_wake: bt-wake {
++			rockchip,pins = <4 RK_PB5 RK_FUNC_GPIO &pcfg_pull_none>;
++		};
++	};
++
++	sdio-pwrseq {
++		wifi_enable: wifi-enable {
++			rockchip,pins = <3 RK_PD4 RK_FUNC_GPIO &pcfg_pull_none>;
++		};
 +	};
 +};
